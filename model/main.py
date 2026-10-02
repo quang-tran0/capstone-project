@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import onnx
+
 
 os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
 
@@ -39,6 +41,17 @@ def main():
     print("last_hidden_state:", last_hidden_state.shape)
     print("first_token[:8]:", last_hidden_state[0, 0, :8])
 
+    model = onnx.load("weights/model_int8.onnx")
+
+    for init in model.graph.initializer:
+        name = init.name.lower()
+
+        if "embedding" in name:
+            print(
+                init.name,
+                "dtype =", init.data_type,
+                "shape =", init.dims,
+            )
 
 if __name__ == "__main__":
     main()
