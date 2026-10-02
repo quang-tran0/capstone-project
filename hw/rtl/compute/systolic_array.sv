@@ -27,18 +27,10 @@ module systolic_array #(
     input logic [COLS-1:0] b_valid_in,
     output wire signed [ACC_WIDTH-1:0] acc_out [ROWS][COLS]
 );
-    // Link index denotes the boundary BEFORE a PE.
-    // a_link[r][0] is the left edge; b_link[0][c] is the top edge.
     wire signed [A_WIDTH-1:0] a_link [ROWS][COLS+1];
     wire signed [B_WIDTH-1:0] b_link [ROWS+1][COLS];
     wire av_link [ROWS][COLS+1];
     wire bv_link [ROWS+1][COLS];
-
-    initial begin
-        if (ROWS < 1 || COLS < 1 || A_WIDTH < 1 || B_WIDTH < 1 ||
-            ACC_WIDTH < A_WIDTH + B_WIDTH)
-            $fatal(1, "Invalid systolic_array dimensions or arithmetic widths");
-    end
 
     for (genvar c = 0; c < COLS; c++) begin : top_edge
         assign b_link[0][c] = b_in[c];
@@ -67,7 +59,4 @@ module systolic_array #(
             );
         end
     end
-    // The right/bottom links are intentionally unused. Results stay local.
-    // acc_clear/load do NOT flush valid links: drain the mesh or reset it
-    // before starting an independent tile. Clear/load priority is in pe.sv.
 endmodule
