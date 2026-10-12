@@ -308,6 +308,35 @@ class MiniLM(nn.Module):
         return x
 
 
+class MeanPooling(nn.Module):
+    """Average token embeddings, excluding padding: (B, N, 384) -> (B, 384)."""
+
+    def forward(self, last_hidden_state, attention_mask=None):
+        if attention_mask is None:
+            return last_hidden_state.mean(dim=1)
+
+        mask = attention_mask.unsqueeze(-1).to(dtype=last_hidden_state.dtype)
+        summed = (last_hidden_state * mask).sum(dim=1)
+        return summed / mask.sum(dim=1).clamp(min=1)
+
+
+class SentenceEmbeddingModel(nn.Module):
+    """MiniLM encoder followed by mean pooling into one vector per sentence."""
+
+    def __init__(self, encoder):
+        super().__init__()
+        self.encoder = encoder
+        self.pooling = MeanPooling()
+
+    def forward(self, input_ids, attention_mask=None, token_type_ids=None):
+        last_hidden_state = self.encoder(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+        )
+        return self.pooling(last_hidden_state, attention_mask)
+
+
 def _dequantize(tensors, quantized_name, zero_point_name):
     scale_name = quantized_name.removesuffix("_quantized") + "_scale"
     return (
@@ -413,14 +442,14 @@ def main():
     )
     inputs["token_type_ids"] = torch.zeros_like(inputs["input_ids"])
 
-    model = load_model_from_onnx(MODEL_PATH)
+    model = SentenceEmbeddingModel(load_model_from_onnx(MODEL_PATH)).eval()
     with torch.inference_mode():
-        last_hidden_state = model(**inputs)
+        sentence_embedding = model(**inputs)
 
     print("text:", text)
     print("input_ids:", tuple(inputs["input_ids"].shape))
-    print("last_hidden_state:", tuple(last_hidden_state.shape))
-    print("first_token[:8]:", last_hidden_state[0, 0, :8].numpy())
+    print("sentence_embedding:", tuple(sentence_embedding.shape))
+    print("sentence_embedding[:8]:", sentence_embedding[0, :8].numpy())
 
 
 if __name__ == "__main__":
