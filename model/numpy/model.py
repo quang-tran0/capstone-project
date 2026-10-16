@@ -6,10 +6,16 @@ else:
     from layers.bert_embedding import BertEmbeddings
 
 class SentenceEmbeddingModel:
-    def __init__(self, model_path):
+    def __init__(self, model_path, trace=False):
         self.model_path = model_path
+        self.trace = trace
         self.tensors = load_initializers(model_path)
-        self.bert_embeddings = BertEmbeddings(self.tensors)
+
+        # Save layer output for comparing with ONNX pytorch output
+        self.layers_output = {}
+        self.bert_embeddings = BertEmbeddings(
+            self.tensors, trace=trace, layers_output=self.layers_output
+        )
 
     def __call__(self, input_ids, attention_mask=None, token_type_ids=None):
         """
@@ -17,13 +23,13 @@ class SentenceEmbeddingModel:
         attention_mask: (batch_size, sequence_length)
         token_type_ids: (batch_size, sequence_length)
 
-        Returns: (batch_size, 384)
+        Returns: (int8 embeddings, int16 scale_exponent), zero point is zero.
+        Real values are approximated by embeddings * 2**scale_exponent.
+        Embeddings have shape (batch_size, sequence_length, 384).
         """
+        self.layers_output.clear()
 
-        x = self.bert_embeddings(
+        return self.bert_embeddings(
             input_ids,
-            token_type_ids
-        ) # (batch_size, sequence_length, 384)
-
-
-        return x
+            token_type_ids,
+        )

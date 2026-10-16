@@ -22,13 +22,17 @@ def main():
     )
 
     model = SentenceEmbeddingModel(MODEL_PATH)
-    sentence_embedding = model(
+    embedding_output, scale_exponent = model(
         inputs["input_ids"],
         attention_mask=inputs["attention_mask"],
         token_type_ids=inputs.get("token_type_ids")
     )
 
-    print("Sentence embedding shape:", sentence_embedding.shape)
+    print("Bert embedding shape:", embedding_output.shape)
+    print("Bert embedding dtype:", embedding_output.dtype)
+    print("Bert embedding scale exponent:", scale_exponent)
+    print("Real value = int8 code * 2**scale_exponent; zero_point = 0")
+    print("Bert embedding:", embedding_output)
 
 if __name__ == "__main__":
     main()

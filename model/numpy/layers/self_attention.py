@@ -1,7 +1,8 @@
 class SelfAttention:
-    def __init__(self, tensors, layer_index):
+    def __init__(self, tensors, trace=False, layers_output=None):
         self.tensors = tensors
-        self.layer_index = layer_index
+        self.trace = trace
+        self.layers_output = layers_output
 
     def __call__(self, hidden_states, attention_mask=None):
         """

@@ -8,7 +8,7 @@ else:
     from feed_forward import FeedForward
 
 class EncoderLayer:
-    def __init__(self, tensors):
+    def __init__(self, tensors, trace=False, layers_output=None):
         self.tensors = tensors
         self.self_attention = SelfAttention(tensors)
         self.attention_output = AttentionOutput(tensors)
