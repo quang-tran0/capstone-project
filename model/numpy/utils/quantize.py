@@ -3,7 +3,8 @@ import numpy as np
 
 def symmetric_quantize(
     x: np.ndarray,
-    scale: float | None = None
+    scale: float | None = None,
+    type: np.dtype = np.int8
 ) -> tuple[np.ndarray, float]:
     """
     Symmetric INT8 Quantization (per-tensor).
@@ -34,8 +35,13 @@ def symmetric_quantize(
         raise ValueError("Scale must be finite and positive")
 
     x_q = np.rint(x / scale)
-    x_q = np.clip(x_q, -128, 127)
-    x_q = x_q.astype(np.int8)
+
+    if type == np.int8:
+        x_q = np.clip(x_q, -128, 127)
+    elif type == np.int32:
+        x_q = np.clip(x_q, -2147483648, 2147483647)
+
+    x_q = x_q.astype(np.int32)
 
     return x_q, scale
 
@@ -46,3 +52,13 @@ def symmetric_dequantize(
 ) -> np.ndarray:
     """Convert INT8 back to FP32."""
     return x_q.astype(np.float32) * scale
+
+def quantize_scale(scale):
+    # quantize scale to int8 with resolution 2^-n
+
+    for degree in range(0, 8):
+        if scale < 2**(-degree): continue
+
+        scale_quantized = int(round(scale * 2**degree))
+
+    return scale_quantized, degree - 1

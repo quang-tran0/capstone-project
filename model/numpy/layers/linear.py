@@ -20,7 +20,7 @@ class Linear:
         x:      (batch_size, seq_len, in_features), int8
         output: (batch_size, seq_len, out_features), int8
         """
-        self.bias_quantized, self.bias_scale = symmetric_quantize(self.bias, x_scale * self.weight_scale)
+        self.bias_quantized, self.bias_scale = symmetric_quantize(self.bias, x_scale * self.weight_scale, type=np.int32)
 
         y_hat = np.matmul(x_quantized, self.weight_quantized) + self.bias_quantized
         y = symmetric_dequantize(y_hat, x_scale * self.weight_scale)
