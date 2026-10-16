@@ -373,7 +373,7 @@ def load_model_from_onnx(path: str | Path):
 
 
 def main():
-    text = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_TEXT
+    text = input("Enter text (or press Enter to use default): ") or DEFAULT_TEXT
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     inputs = tokenizer(
         text,

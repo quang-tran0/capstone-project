@@ -1,15 +1,10 @@
 import numpy as np
 
 from .layer_norm import LayerNorm
-
-if __package__ == "layers":
-    from utils.requant import symmetric_quantize
-else:
-    from ..utils.requant import symmetric_quantize
-
+from ..utils.quantize import symmetric_quantize, symmetric_dequantize
 
 class BertEmbeddings:
-    """MiniLM embeddings and LayerNorm, followed by symmetric int8 quantization."""
+    """Float32 embeddings and LayerNorm, followed by symmetric INT8 quantization."""
 
     def __init__(self, tensors, trace=False, layers_output=None):
         self.tensors = tensors
@@ -19,11 +14,7 @@ class BertEmbeddings:
         self.layer_norm = LayerNorm(tensors)
 
     def _lookup(self, name, ids):
-        prefix = f"embeddings.{name}.weight"
-        quantized = self.tensors[f"{prefix}_quantized"][ids]
-        zero_point = np.float32(self.tensors[f"{prefix}_zero_point"])
-        scale = np.float32(self.tensors[f"{prefix}_scale"])
-        return (quantized.astype(np.float32) - zero_point) * scale
+        return self.tensors[f"embeddings.{name}.weight"][ids]
 
     def forward(self, input_ids, token_type_ids=None):
         _, seq_len = input_ids.shape
@@ -37,7 +28,8 @@ class BertEmbeddings:
 
         summed = word + position + token_type
         output = self.layer_norm(summed)
-        quantized, scale_exponent = symmetric_quantize(output)
+
+        quantized_output, scale = symmetric_quantize(output)
 
         # TRACE
         if self.trace and self.layers_output is not None:
@@ -46,11 +38,19 @@ class BertEmbeddings:
                 "embeddings.position": position,
                 "embeddings.token_type": token_type,
                 "embeddings.sum": summed,
-                "embeddings.output": output,
-                "embeddings.quantized": quantized,
-                "embeddings.scale_exponent": scale_exponent,
+                "embeddings.output": symmetric_dequantize(quantized_output, scale),
+                "embeddings.quantized": quantized_output,
+                "embeddings.scale": scale,
             })
-        return quantized, scale_exponent
+        return quantized_output, scale
+
+    def display_trace(self):
+        if self.trace and self.layers_output is not None:
+            print("\n===== Bert Embeddings Layer Info =====")
+            print("- Output max:", np.max(self.layers_output["embeddings.output"]))
+            print("- Output min:", np.min(self.layers_output["embeddings.output"]))
+            print("- Output mean:", np.mean(self.layers_output["embeddings.output"]))
+            print("- Scale:", self.layers_output["embeddings.scale"])
 
     def __call__(self, input_ids, token_type_ids=None):
         return self.forward(input_ids, token_type_ids)

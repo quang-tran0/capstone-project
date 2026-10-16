@@ -1,12 +1,13 @@
 import sys
+from pathlib import Path
+
 from transformers import AutoTokenizer
 
-if __package__:
-    from .config import DEFAULT_TEXT, MODEL_ID, MODEL_PATH
-    from .model import SentenceEmbeddingModel
-else:
-    from config import DEFAULT_TEXT, MODEL_ID, MODEL_PATH
-    from model import SentenceEmbeddingModel
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from model.numpy.config import DEFAULT_TEXT, MODEL_ID, MODEL_PATH
+from model.numpy.model import SentenceEmbeddingModel
 
 
 def main():
@@ -21,8 +22,8 @@ def main():
         max_length=128
     )
 
-    model = SentenceEmbeddingModel(MODEL_PATH)
-    embedding_output, scale_exponent = model(
+    model = SentenceEmbeddingModel(MODEL_PATH, trace=True)
+    embedding_output, scale = model(
         inputs["input_ids"],
         attention_mask=inputs["attention_mask"],
         token_type_ids=inputs.get("token_type_ids")
@@ -30,9 +31,8 @@ def main():
 
     print("Bert embedding shape:", embedding_output.shape)
     print("Bert embedding dtype:", embedding_output.dtype)
-    print("Bert embedding scale exponent:", scale_exponent)
-    print("Real value = int8 code * 2**scale_exponent; zero_point = 0")
-    print("Bert embedding:", embedding_output)
+    print("Bert embedding scale:", scale)
+    model.display_trace()
 
 if __name__ == "__main__":
     main()

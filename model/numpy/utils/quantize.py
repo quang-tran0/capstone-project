@@ -1,9 +1,6 @@
 import numpy as np
 
 
-import numpy as np
-
-
 def symmetric_quantize(
     x: np.ndarray,
     scale: float | None = None
@@ -28,7 +25,7 @@ def symmetric_quantize(
 
     if scale is None:
         max_abs = np.max(np.abs(x))
-        scale = float(max_abs / 127.0)
+        scale = float(max_abs / 128.0)
 
         if scale == 0:
             scale = 1.0
@@ -37,7 +34,7 @@ def symmetric_quantize(
         raise ValueError("Scale must be finite and positive")
 
     x_q = np.rint(x / scale)
-    x_q = np.clip(x_q, -127, 127)
+    x_q = np.clip(x_q, -128, 127)
     x_q = x_q.astype(np.int8)
 
     return x_q, scale

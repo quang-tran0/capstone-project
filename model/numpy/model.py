@@ -1,9 +1,5 @@
-if __package__:
-    from .weights import load_initializers
-    from .layers.bert_embedding import BertEmbeddings
-else:
-    from weights import load_initializers
-    from layers.bert_embedding import BertEmbeddings
+from .weights import load_initializers
+from .layers.bert_embedding import BertEmbeddings
 
 class SentenceEmbeddingModel:
     def __init__(self, model_path, trace=False):
@@ -23,8 +19,7 @@ class SentenceEmbeddingModel:
         attention_mask: (batch_size, sequence_length)
         token_type_ids: (batch_size, sequence_length)
 
-        Returns: (int8 embeddings, int16 scale_exponent), zero point is zero.
-        Real values are approximated by embeddings * 2**scale_exponent.
+        Returns: (int8 embeddings, float scale), with zero point equal to zero.
         Embeddings have shape (batch_size, sequence_length, 384).
         """
         self.layers_output.clear()
@@ -33,3 +28,6 @@ class SentenceEmbeddingModel:
             input_ids,
             token_type_ids,
         )
+
+    def display_trace(self):
+        self.bert_embeddings.display_trace()
