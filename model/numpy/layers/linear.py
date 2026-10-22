@@ -1,6 +1,7 @@
 import numpy as np
 
-from ..utils.quantize import symmetric_quantize, symmetric_dequantize
+from ..utils.quantize import symmetric_quantize, symmetric_dequantize, requantize
+from ..utils.scale_int12 import ScaleInt12
 
 
 class Linear:
@@ -15,21 +16,34 @@ class Linear:
         self.trace = trace
         self.layers_output = layers_output
 
-    def __call__(self, x_quantized, x_scale=None):
+    def __call__(self, x_quantized, x_scale):
         """
-        x:      (batch_size, seq_len, in_features), int8
-        output: (batch_size, seq_len, out_features), int8
+        x:      (batch_size, seq_len, in_features), codes in [-127, 127]
+        output: (batch_size, seq_len, out_features), np.int8 + ScaleInt12
         """
-        self.bias_quantized, self.bias_scale = symmetric_quantize(self.bias, x_scale * self.weight_scale, type=np.int32)
-
-        y_hat = np.matmul(x_quantized, self.weight_quantized) + self.bias_quantized
-        y = symmetric_dequantize(y_hat, x_scale * self.weight_scale)
-        y_quantized, y_scale = symmetric_quantize(y)
+        x_quantized = np.asarray(x_quantized)
+        if not np.issubdtype(x_quantized.dtype, np.integer):
+            raise TypeError("Linear input must contain integer codes")
+        if np.any(x_quantized < -127) or np.any(x_quantized > 127):
+            raise ValueError("Linear input codes must be in [-127, 127]")
+        if not isinstance(x_scale, ScaleInt12) or float(x_scale) <= 0:
+            raise ValueError("Linear input scale must be a positive ScaleInt12")
+        accumulator_scale = x_scale.multiply_wide(self.weight_scale)
+        self.bias_quantized, self.bias_scale = symmetric_quantize(
+            self.bias, accumulator_scale, type=np.int32
+        )
+        y_hat = (
+            np.matmul(x_quantized.astype(np.int64), self.weight_quantized.astype(np.int64))
+            + self.bias_quantized.astype(np.int64)
+        )
+        y_quantized, y_scale = requantize(y_hat, accumulator_scale)
 
         # TRACE
         if self.trace and self.layers_output is not None:
             self.layers_output.update({
-                f"encoder.layer.{self.name}.output": y,
+                f"encoder.layer.{self.name}.accumulator": y_hat,
+                f"encoder.layer.{self.name}.accumulator_scale": accumulator_scale,
+                f"encoder.layer.{self.name}.output": symmetric_dequantize(y_quantized, y_scale),
                 f"encoder.layer.{self.name}.quantized": y_quantized,
                 f"encoder.layer.{self.name}.scale": y_scale
             })

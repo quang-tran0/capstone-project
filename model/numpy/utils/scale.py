@@ -3,9 +3,8 @@ import math
 import numpy as np
 
 
-
 def quantize_scale(scale: float) -> tuple[np.int8, np.uint8]:
-    """Represent a scale in [0, 1] as multiplier * 2**(-n).
+    """Represent a scale in [0, 127] as multiplier * 2**(-n).
 
     The multiplier is signed INT8 (0..127 for a scale). The exponent n is
     unsigned 4-bit (0..15), stored in np.uint8 because NumPy has no UINT4
@@ -13,8 +12,8 @@ def quantize_scale(scale: float) -> tuple[np.int8, np.uint8]:
     The finest step is 2**(-15); smaller values may round to zero.
     """
     scale = float(scale)
-    if not math.isfinite(scale) or not 0 <= scale <= 1:
-        raise ValueError("Scale must be finite and in [0, 1]")
+    if not math.isfinite(scale) or not 0 <= scale <= 127:
+        raise ValueError("Scale must be finite and in [0, 127]")
 
     for n in range(15, -1, -1):
         multiplier = round(scale * 2**n)
@@ -34,6 +33,8 @@ if __name__ == "__main__":
         (0.5, (64, 7)),
         (127 / 128, (127, 7)),
         (1.0, (64, 6)),
+        (2.0, (64, 5)),
+        (127.0, (127, 0)),
         (127 / 256, (127, 8)),
     ):
         multiplier, degree = quantize_scale(value)
@@ -41,7 +42,7 @@ if __name__ == "__main__":
         assert isinstance(multiplier, np.int8) and isinstance(degree, np.uint8)
         assert abs(value - int(multiplier) * 2.0**(-int(degree))) <= 2.0**(-int(degree) - 1)
 
-    for value in (-1.0, 1.01, math.inf, math.nan):
+    for value in (-1.0, 128.0, math.inf, math.nan):
         try:
             quantize_scale(value)
         except ValueError:

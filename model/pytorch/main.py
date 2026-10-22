@@ -101,20 +101,20 @@ class SelfAttention(nn.Module):
 
         x = x.view(
             batch_size,  # 1
-            seq_len,  # max 128
+            seq_len,  # seq length
             NUM_HEADS,  # 12
             HEAD_DIM,  # 32
         )
 
-        return x.transpose(1, 2) # (1, 12, max 128, 32)
+        return x.transpose(1, 2) # (1, 12, seq length, 32)
 
     def forward(self, x, attention_mask=None):
-
+        # x: (1, seq length, 384)
         Q = self.split_heads(self.query(x))
         K = self.split_heads(self.key(x))
-        V = self.split_heads(self.value(x)) # (1, 12, max 128, 32)
+        V = self.split_heads(self.value(x)) # (1, 12, seq length, 32)
 
-        scores = Q @ K.transpose(-2, -1) # (1, 12, max 128, max 128)
+        scores = Q @ K.transpose(-2, -1) # (1, 12, seq length, seq length)
 
         scores = scores / math.sqrt(HEAD_DIM)
 
@@ -132,9 +132,9 @@ class SelfAttention(nn.Module):
             dim=-1,
         )
 
-        context = probabilities @ V # (1, 12, max 128, 32)
+        context = probabilities @ V # (1, 12, seq length, 32)
 
-        context = context.transpose(1, 2) # (1, max 128, 12, 32)
+        context = context.transpose(1, 2) # (1, seq length, 12, 32)
 
         batch_size, seq_len, _, _ = context.shape
 

@@ -29,9 +29,9 @@ def main():
         token_type_ids=inputs.get("token_type_ids")
     )
 
-    print("Bert embedding shape:", embedding_output.shape)
-    print("Bert embedding dtype:", embedding_output.dtype)
-    print("Bert embedding scale:", scale)
+    print("Sentence embedding shape:", embedding_output.shape)
+    print("Sentence embedding dtype:", embedding_output.dtype)
+    print("Sentence embedding scale:", scale)
     model.display_trace()
 
 if __name__ == "__main__":
