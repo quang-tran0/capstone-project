@@ -11,7 +11,7 @@ def symmetric_quantize(
 
     Args:
         x: Tensor FP32.
-        scale:
+        scale:z
             None  -> Dynamic Quantization.
             float -> Static Quantization.
 
@@ -52,13 +52,3 @@ def symmetric_dequantize(
 ) -> np.ndarray:
     """Convert INT8 back to FP32."""
     return x_q.astype(np.float32) * scale
-
-def quantize_scale(scale):
-    # quantize scale to int8 with resolution 2^-n
-
-    for degree in range(0, 8):
-        if scale < 2**(-degree): continue
-
-        scale_quantized = int(round(scale * 2**degree))
-
-    return scale_quantized, degree - 1
