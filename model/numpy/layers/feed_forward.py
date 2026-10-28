@@ -1,18 +1,14 @@
-import math
-
 import numpy as np
 
 from ..config import NUM_LAYERS
-from ..utils.quantize import add_quantized, symmetric_dequantize, symmetric_quantize
+from ..utils.fixed import to_float
+from ..utils.gelu import gelu_fixed, prepare_phi_lut
 from .int_layer_norm import IntLayerNorm
 from .linear import Linear
 
 
-_erf = np.vectorize(math.erf, otypes=[np.float64])
-
-
 class FeedForward:
-    """Dense -> exact GELU -> dense -> residual -> LayerNorm."""
+    """Dense -> GELU (Phi LUT) -> dense -> Q.16 residual -> LayerNorm."""
 
     def __init__(self, tensors, layer_index=0, trace=False, layers_output=None):
         if not 0 <= layer_index < NUM_LAYERS:
@@ -35,16 +31,12 @@ class FeedForward:
             tensors, prefix=f"{self.prefix}.output.LayerNorm",
             trace=trace, layers_output=layers_output,
         )
+        self.phi_lut = prepare_phi_lut()
 
     def __call__(self, hidden_states):
-        intermediate = symmetric_dequantize(*self.dense1(*hidden_states))
-        activated = intermediate * 0.5 * (1.0 + _erf(intermediate / math.sqrt(2.0)))
-        activation = symmetric_quantize(activated)
+        # GELU works on the Q.16 accumulator output, before any INT8 rounding.
+        activation = gelu_fixed(self.dense1(hidden_states), self.phi_lut)
         if self.trace and self.layers_output is not None:
-            self.layers_output.update({
-                f"{self.prefix}.intermediate.gelu.output": symmetric_dequantize(*activation),
-                f"{self.prefix}.intermediate.gelu.quantized": activation[0],
-                f"{self.prefix}.intermediate.gelu.scale": activation[1],
-            })
-        projected = self.dense2(*activation)
-        return self.layer_norm(add_quantized(projected, hidden_states, wide=True))
+            self.layers_output[f"{self.prefix}.intermediate.gelu.output"] = to_float(activation)
+        projected = self.dense2(activation)
+        return self.layer_norm(projected.astype(np.int64) + hidden_states)

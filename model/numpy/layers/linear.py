@@ -1,59 +1,50 @@
 import numpy as np
 
-from ..utils.quantize import symmetric_quantize, symmetric_dequantize, requantize
-from ..utils.scale_int12 import ScaleInt12
+from ..utils.fixed import FRAC_BITS, check_bits, round_shift, to_float
+from ..utils.int_quantize import quantize_fixed, quantize_weight
+
+
+# INT8 x INT8 MACs plus nothing else: K <= 1536 products of |x| <= 127^2.
+ACCUMULATOR_BITS = 32
 
 
 class Linear:
+    """INT8 matmul with per-token input scales and per-channel weight scales.
+
+    y[i, j] = acc[i, j] * S_x[i] * S_w[j] + b[j], returned in Q.16.
+    """
+
     def __init__(self, weight, bias, name, trace=False, layers_output=None):
-        # Weight lấy trực tiếp từ ONNX: (in_features, out_features).
-        self.weight = np.asarray(weight, dtype=np.float32)
-        self.weight_quantized, self.weight_scale = symmetric_quantize(self.weight)
-        self.bias = np.asarray(bias, dtype=np.float32)
-        self.bias_quantized, self.bias_scale = None, None
+        # Offline: weight from ONNX has shape (in_features, out_features).
+        self.weight_q, self.weight_m, self.weight_n = quantize_weight(weight, axis=0)
+        self.bias = np.round(np.asarray(bias, dtype=np.float64) * (1 << FRAC_BITS)).astype(np.int64)
 
         self.name = name
         self.trace = trace
         self.layers_output = layers_output
 
-    def __call__(self, x_quantized, x_scale):
-        """
-        x:      (batch_size, seq_len, in_features), codes in [-127, 127]
-        output: (batch_size, seq_len, out_features), np.int8 + ScaleInt12
-        """
-        x_quantized = np.asarray(x_quantized)
-        if not np.issubdtype(x_quantized.dtype, np.integer):
-            raise TypeError("Linear input must contain integer codes")
-        if np.any(x_quantized < -127) or np.any(x_quantized > 127):
-            raise ValueError("Linear input codes must be in [-127, 127]")
-        if not isinstance(x_scale, ScaleInt12) or float(x_scale) <= 0:
-            raise ValueError("Linear input scale must be a positive ScaleInt12")
-        accumulator_scale = x_scale.multiply_wide(self.weight_scale)
-        self.bias_quantized, self.bias_scale = symmetric_quantize(
-            self.bias, accumulator_scale, type=np.int32
-        )
-        y_hat = (
-            np.matmul(x_quantized.astype(np.int64), self.weight_quantized.astype(np.int64))
-            + self.bias_quantized.astype(np.int64)
-        )
-        y_quantized, y_scale = requantize(y_hat, accumulator_scale)
+    def forward_quantized(self, x_q, x_m, x_n):
+        """x_q: INT8 (..., in) with scale fields (m, n) of shape (..., 1)."""
+        accumulator = np.matmul(x_q.astype(np.int64), self.weight_q.astype(np.int64))
+        check_bits(accumulator, ACCUMULATOR_BITS, f"{self.name} accumulator")
 
-        # TRACE
+        # S_x * S_w = (m_x * m_w) * 2**-(n_x + n_w), rescaled to Q.16.
+        output = round_shift(
+            accumulator * (x_m * self.weight_m),
+            x_n + self.weight_n - FRAC_BITS,
+        ) + self.bias
+        output = check_bits(output, 32, f"{self.name} output").astype(np.int32)
+
         if self.trace and self.layers_output is not None:
             self.layers_output.update({
-                f"encoder.layer.{self.name}.accumulator": y_hat,
-                f"encoder.layer.{self.name}.accumulator_scale": accumulator_scale,
-                f"encoder.layer.{self.name}.output": symmetric_dequantize(y_quantized, y_scale),
-                f"encoder.layer.{self.name}.quantized": y_quantized,
-                f"encoder.layer.{self.name}.scale": y_scale
+                f"encoder.layer.{self.name}.accumulator": accumulator,
+                f"encoder.layer.{self.name}.output": to_float(output),
             })
+        return output
 
-        return y_quantized, y_scale
-
-    def display_trace(self):
-        if self.trace and self.layers_output is not None:
-            print(f"\n===== Linear Layer Info ({self.name}) =====")
-            print("- Output max:", np.max(self.layers_output[f"encoder.layer.{self.name}.output"]))
-            print("- Output min:", np.min(self.layers_output[f"encoder.layer.{self.name}.output"]))
-            print("- Output mean:", np.mean(self.layers_output[f"encoder.layer.{self.name}.output"]))
-            print("- Scale:", self.layers_output[f"encoder.layer.{self.name}.scale"])
+    def __call__(self, x):
+        """x: Q.16 (..., in) -> Q.16 (..., out); the input is quantized per token."""
+        x = np.asarray(x)
+        if not np.issubdtype(x.dtype, np.integer):
+            raise TypeError("Linear input must be a Q.16 integer tensor")
+        return self.forward_quantized(*quantize_fixed(x, axis=-1))

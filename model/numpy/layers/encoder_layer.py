@@ -1,3 +1,4 @@
+from ..utils.fixed import to_float
 from .attention_output import AttentionOutput
 from .self_attention import SelfAttention
 from .feed_forward import FeedForward
@@ -23,5 +24,5 @@ class EncoderLayer:
         x = self.attention_output(attention, x)
         x = self.feed_forward(x)
         if self.trace and self.layers_output is not None:
-            self.layers_output[f"encoder.layer.{self.layer_index}.output"] = x
+            self.layers_output[f"encoder.layer.{self.layer_index}.output"] = to_float(x)
         return x

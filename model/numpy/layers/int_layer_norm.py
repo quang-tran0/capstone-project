@@ -2,10 +2,8 @@ import math
 
 import numpy as np
 
-from ..utils.fixed import bit_length, check_bits, round_shift
-from ..utils.quantize import requantize, symmetric_dequantize
+from ..utils.fixed import FRAC_BITS, bit_length, check_bits, round_shift, to_float
 from ..utils.rsqrt import prepare_rsqrt_lut, rsqrt_fixed
-from ..utils.scale_int12 import ScaleInt12
 
 
 # e = d >> shift fits the 18-bit DSP48E2 port before squaring.
@@ -16,7 +14,7 @@ ACCUMULATOR_BITS = 48
 NORM_FRAC_BITS = 17
 # max |gamma| * sqrt(384) over all 25 LayerNorms is about 67, so Q.10 fits 18 bits.
 GAMMA_FRAC_BITS = 10
-OUTPUT_FRAC_BITS = 16
+OUTPUT_FRAC_BITS = FRAC_BITS
 
 
 class IntLayerNorm:
@@ -25,7 +23,7 @@ class IntLayerNorm:
     With d = N*x - sum(x), (x - mean) / std = sqrt(N) * d / ||d||, so there
     is no division; sqrt(N) is folded into gamma offline and 1/sqrt comes
     from a LUT plus one Newton step. The input scale cancels in d / ||d||,
-    and eps (1e-12) is ignored. The Q.16 result is requantized to INT8.
+    and eps (1e-12) is ignored. The output is the Q.16 residual stream.
     """
 
     def __init__(self, tensors, prefix="embeddings.LayerNorm",
@@ -75,19 +73,13 @@ class IntLayerNorm:
         return check_bits(scaled + self.beta, 32, "LayerNorm output").astype(np.int32)
 
     def __call__(self, hidden_states):
-        codes, scale = hidden_states
-        codes = np.asarray(codes)
-        if not np.issubdtype(codes.dtype, np.integer):
-            raise TypeError("LayerNorm input must contain integer codes")
-        if codes.shape[-1] != self.width or float(scale) <= 0:
-            raise ValueError("Invalid LayerNorm hidden dimension or scale")
-        output = self.normalize(codes)
-        unit = ScaleInt12.from_parts(1, OUTPUT_FRAC_BITS, normalize=False)
-        result = requantize(output, unit)
+        """Integer input in any fixed-point format -> Q.16 np.int32."""
+        hidden_states = np.asarray(hidden_states)
+        if not np.issubdtype(hidden_states.dtype, np.integer):
+            raise TypeError("LayerNorm input must be an integer tensor")
+        if hidden_states.shape[-1] != self.width:
+            raise ValueError("Invalid LayerNorm hidden dimension")
+        output = self.normalize(hidden_states)
         if self.trace and self.layers_output is not None:
-            self.layers_output.update({
-                f"{self.prefix}.output": symmetric_dequantize(*result),
-                f"{self.prefix}.quantized": result[0],
-                f"{self.prefix}.scale": result[1],
-            })
-        return result
+            self.layers_output[f"{self.prefix}.output"] = to_float(output)
+        return output

@@ -1,11 +1,12 @@
+import numpy as np
+
 from ..config import NUM_LAYERS
-from ..utils.quantize import add_quantized
 from .int_layer_norm import IntLayerNorm
 from .linear import Linear
 
 
 class AttentionOutput:
-    """Attention projection, residual addition, then LayerNorm."""
+    """Attention projection, Q.16 residual addition, then LayerNorm."""
 
     def __init__(self, tensors, layer_index=0, trace=False, layers_output=None):
         if not 0 <= layer_index < NUM_LAYERS:
@@ -22,5 +23,6 @@ class AttentionOutput:
         )
 
     def __call__(self, attention_output, hidden_states):
-        projected = self.dense(*attention_output)
-        return self.layer_norm(add_quantized(projected, hidden_states, wide=True))
+        projected = self.dense(attention_output)
+        # Both operands are Q.16, so the residual is a plain integer add.
+        return self.layer_norm(projected.astype(np.int64) + hidden_states)

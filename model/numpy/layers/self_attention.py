@@ -1,14 +1,22 @@
+import math
+
 import numpy as np
 
 from ..config import HEAD_DIM, HIDDEN_SIZE, NUM_HEADS, NUM_LAYERS
-from ..utils.quantize import symmetric_dequantize, symmetric_quantize, requantize
-from ..utils.scale_int12 import ScaleInt12
-from ..utils.softmax import softmax
+from ..utils.fixed import FRAC_BITS, check_bits, round_shift, to_float
+from ..utils.int_quantize import quantize_fixed
+from ..utils.reciprocal import prepare_reciprocal_lut, reciprocal_fixed
+from ..utils.softmax import EXP2_FRAC_BITS, PROBABILITY_MAX, prepare_exp2_lut, softmax_fixed
 from .linear import Linear
 
 
+# 1/sqrt(HEAD_DIM) in Q.15, folded into the score rescale.
+INV_SQRT_HEAD_DIM_BITS = 15
+INV_SQRT_HEAD_DIM = round((1 << INV_SQRT_HEAD_DIM_BITS) / math.sqrt(HEAD_DIM))
+
+
 class SelfAttention:
-    """Integer Q/K/V, scores and context MACs; float32 softmax."""
+    """Integer Q/K/V, scores, softmax and context; output in Q.16."""
 
     def __init__(self, tensors, layer_index=0, trace=False, layers_output=None):
         if not 0 <= layer_index < NUM_LAYERS:
@@ -22,6 +30,8 @@ class SelfAttention:
         self.query = self._linear("query")
         self.key = self._linear("key")
         self.value = self._linear("value")
+        self.exp2_lut = prepare_exp2_lut()
+        self.reciprocal_lut = prepare_reciprocal_lut()
 
     def _linear(self, name):
         prefix = f"{self.prefix}.{name}"
@@ -39,75 +49,69 @@ class SelfAttention:
 
     def __call__(self, hidden_states, attention_mask=None):
         """
-        hidden_states: (quantized tensor, scale), as returned by BertEmbeddings.
-            Tensor shape: (batch_size, sequence_length, 384), codes in [-127, 127].
-        attention_mask: (batch_size, sequence_length)
+        hidden_states: Q.16 (batch_size, sequence_length, 384).
+        attention_mask: (batch_size, sequence_length), 1 for real tokens.
 
-        Returns: (quantized context, scale), with tensor shape (B, N, 384).
-        Integer storage dtype is np.int8; scale is ScaleInt12.
+        Returns: Q.16 context of shape (B, N, 384), np.int32.
         """
-        x_quantized, x_scale = hidden_states
-        x_quantized = np.asarray(x_quantized)
-        if x_quantized.ndim != 3 or x_quantized.shape[-1] != HIDDEN_SIZE:
-            raise ValueError(f"Expected quantized input shape (B, N, {HIDDEN_SIZE})")
-        if not np.issubdtype(x_quantized.dtype, np.integer):
-            raise TypeError("hidden_states must contain integer quantized codes")
-        if np.any(x_quantized < -127) or np.any(x_quantized > 127):
-            raise ValueError("Input codes must be in [-127, 127]")
-        if not isinstance(x_scale, ScaleInt12) or float(x_scale) <= 0:
-            raise ValueError("Input scale must be a positive ScaleInt12")
-        if attention_mask is not None:
-            attention_mask = np.asarray(attention_mask)
-            if attention_mask.shape != x_quantized.shape[:2]:
-                raise ValueError("attention_mask must have shape (batch_size, sequence_length)")
-            if not np.all((attention_mask == 0) | (attention_mask == 1)):
-                raise ValueError("attention_mask must contain only 0 or 1")
+        hidden_states = np.asarray(hidden_states)
+        if hidden_states.ndim != 3 or hidden_states.shape[-1] != HIDDEN_SIZE:
+            raise ValueError(f"Expected input shape (B, N, {HIDDEN_SIZE})")
+        if not np.issubdtype(hidden_states.dtype, np.integer):
+            raise TypeError("hidden_states must be a Q.16 integer tensor")
+        batch_size, seq_len, _ = hidden_states.shape
+        if attention_mask is None:
+            attention_mask = np.ones((batch_size, seq_len), dtype=np.int64)
+        attention_mask = np.asarray(attention_mask)
+        if attention_mask.shape != (batch_size, seq_len):
+            raise ValueError("attention_mask must have shape (batch_size, sequence_length)")
+        if not np.all((attention_mask == 0) | (attention_mask == 1)):
+            raise ValueError("attention_mask must contain only 0 or 1")
 
-        x_quantized = x_quantized.astype(np.int32, copy=False)
-        q, q_scale = self.query(x_quantized, x_scale)
-        k, k_scale = self.key(x_quantized, x_scale)
-        v, v_scale = self.value(x_quantized, x_scale)
-        q = self.split_heads(q).astype(np.int64)
-        k = self.split_heads(k).astype(np.int64)
-        v = self.split_heads(v).astype(np.int64)
+        # The input is quantized once and shared by Q, K and V.
+        x = quantize_fixed(hidden_states, axis=-1)
+        q = self.split_heads(self.query.forward_quantized(*x))
+        k = self.split_heads(self.key.forward_quantized(*x))
+        v = self.split_heads(self.value.forward_quantized(*x))
 
-        score_accumulator = q @ k.swapaxes(-2, -1)
-        score_scale = q_scale.multiply_wide(k_scale)
-        scores = symmetric_dequantize(score_accumulator, score_scale)
-        scores = scores / np.float32(np.sqrt(HEAD_DIM))
-        if attention_mask is not None:
-            scores = np.where(
-                attention_mask[:, None, None, :] == 0,
-                np.finfo(np.float32).min,
-                scores,
-            )
-        probabilities = softmax(scores, axis=-1)
-        if attention_mask is not None:
-            probabilities = np.where(attention_mask[:, None, None, :] != 0, probabilities, 0)
-        probabilities_q, probabilities_scale = symmetric_quantize(probabilities)
-        context_accumulator = probabilities_q.astype(np.int64) @ v
-        context_scale = probabilities_scale.multiply_wide(v_scale)
-        batch_size, seq_len, _ = x_quantized.shape
-        context_accumulator = context_accumulator.transpose(0, 2, 1, 3).reshape(
-            batch_size, seq_len, HIDDEN_SIZE
+        # Q and K: one scale per token and head. V: one scale per channel,
+        # since the context sums over tokens.
+        q_q, q_m, q_n = quantize_fixed(q, axis=-1)
+        k_q, k_m, k_n = quantize_fixed(k, axis=-1)
+        v_q, v_m, v_n = quantize_fixed(v, axis=-2)
+
+        score_accumulator = q_q.astype(np.int64) @ k_q.astype(np.int64).swapaxes(-2, -1)
+        check_bits(score_accumulator, 20, "score accumulator")
+
+        # z = acc * S_q[i] * S_k[j] / sqrt(D), in Q.16.
+        k_m, k_n = k_m.swapaxes(-2, -1), k_n.swapaxes(-2, -1)
+        scores = round_shift(
+            score_accumulator * (q_m * k_m) * INV_SQRT_HEAD_DIM,
+            q_n + k_n + INV_SQRT_HEAD_DIM_BITS - FRAC_BITS,
         )
-        quantized, scale = requantize(context_accumulator, context_scale)
+
+        mask = attention_mask[:, None, None, :] != 0
+        probabilities_q, total = softmax_fixed(scores, mask, self.exp2_lut)
+
+        context_accumulator = probabilities_q.astype(np.int64) @ v_q.astype(np.int64)
+        check_bits(context_accumulator, 22, "context accumulator")
+
+        # context = acc * S_v * 2**15 / (127 * E), one reciprocal per row.
+        mantissa, shift = reciprocal_fixed(PROBABILITY_MAX * total, self.reciprocal_lut)
+        context = round_shift(
+            context_accumulator * v_m * mantissa,
+            v_n + shift - EXP2_FRAC_BITS - FRAC_BITS,
+        )
+        context = context.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, HIDDEN_SIZE)
+        context = check_bits(context, 32, "context").astype(np.int32)
 
         if self.trace and self.layers_output is not None:
             self.layers_output.update({
-                f"{self.prefix}.query_heads": symmetric_dequantize(q, q_scale),
-                f"{self.prefix}.key_heads": symmetric_dequantize(k, k_scale),
-                f"{self.prefix}.value_heads": symmetric_dequantize(v, v_scale),
                 f"{self.prefix}.score_accumulator": score_accumulator,
-                f"{self.prefix}.score_scale": score_scale,
-                f"{self.prefix}.scores": scores,
-                f"{self.prefix}.probabilities": probabilities,
+                f"{self.prefix}.scores": to_float(scores),
                 f"{self.prefix}.probabilities_quantized": probabilities_q,
-                f"{self.prefix}.probabilities_scale": probabilities_scale,
+                f"{self.prefix}.probability_total": total,
                 f"{self.prefix}.context_accumulator": context_accumulator,
-                f"{self.prefix}.context": symmetric_dequantize(context_accumulator, context_scale),
-                f"{self.prefix}.output": symmetric_dequantize(quantized, scale),
-                f"{self.prefix}.quantized": quantized,
-                f"{self.prefix}.scale": scale,
+                f"{self.prefix}.output": to_float(context),
             })
-        return quantized, scale
+        return context
