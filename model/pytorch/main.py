@@ -2,7 +2,6 @@ import math
 import sys
 from pathlib import Path
 
-import numpy as np
 import onnx
 import torch
 import torch.nn as nn
@@ -20,40 +19,8 @@ MAX_POSITION = 512
 TYPE_VOCAB_SIZE = 2
 LAYER_NORM_EPS = 1e-12
 MODEL_ID = "onnx-community/paraphrase-multilingual-MiniLM-L12-v2-ONNX"
-MODEL_PATH = Path(__file__).parents[1] / "weights" / "model_int8.onnx"
+MODEL_PATH = Path(__file__).resolve().parents[1] / "weights" / "model.onnx"
 DEFAULT_TEXT = "Tôi đang làm đồ án FPGA."
-
-
-def _dynamic_quantize(x):
-    zero = torch.zeros((), dtype=x.dtype, device=x.device)
-    lower = torch.minimum(x.min(), zero)
-    upper = torch.maximum(x.max(), zero)
-    scale = (upper - lower) / 255
-    scale = torch.where(scale == 0, torch.ones_like(scale), scale)
-    zero_point = torch.round(torch.clamp(-lower / scale, 0, 255))
-    quantized = torch.clamp(torch.round(x / scale) + zero_point, 0, 255)
-    return quantized.to(torch.int32), scale, zero_point.to(torch.int32)
-
-
-class DynamicQuantizedLinear(nn.Module):
-
-    def __init__(self, in_features, out_features):
-        super().__init__()
-        self.register_buffer(
-            "weight",
-            torch.empty(in_features, out_features, dtype=torch.int8),
-        )
-        self.register_buffer("weight_scale", torch.empty((), dtype=torch.float32))
-        self.register_buffer("weight_zero_point", torch.empty((), dtype=torch.int8))
-        self.bias = nn.Parameter(torch.empty(out_features))
-
-    def forward(self, x):
-        quantized, scale, zero_point = _dynamic_quantize(x)
-        accumulator = (quantized - zero_point) @ (
-            self.weight.to(torch.int32) - self.weight_zero_point.to(torch.int32)
-        )
-        return accumulator.to(torch.float32) * (scale * self.weight_scale) + self.bias
-
 
 
 class BertEmbeddings(nn.Module):
@@ -113,17 +80,17 @@ class SelfAttention(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.query = DynamicQuantizedLinear(
+        self.query = nn.Linear(
             HIDDEN_SIZE,
             HIDDEN_SIZE,
         )
 
-        self.key = DynamicQuantizedLinear(
+        self.key = nn.Linear(
             HIDDEN_SIZE,
             HIDDEN_SIZE,
         )
 
-        self.value = DynamicQuantizedLinear(
+        self.value = nn.Linear(
             HIDDEN_SIZE,
             HIDDEN_SIZE,
         )
@@ -134,20 +101,20 @@ class SelfAttention(nn.Module):
 
         x = x.view(
             batch_size,  # 1
-            seq_len,  # max 128
+            seq_len,  # seq length
             NUM_HEADS,  # 12
             HEAD_DIM,  # 32
         )
 
-        return x.transpose(1, 2) # (1, 12, max 128, 32)
+        return x.transpose(1, 2) # (1, 12, seq length, 32)
 
     def forward(self, x, attention_mask=None):
-
+        # x: (1, seq length, 384)
         Q = self.split_heads(self.query(x))
         K = self.split_heads(self.key(x))
-        V = self.split_heads(self.value(x)) # (1, 12, max 128, 32)
+        V = self.split_heads(self.value(x)) # (1, 12, seq length, 32)
 
-        scores = Q @ K.transpose(-2, -1) # (1, 12, max 128, max 128)
+        scores = Q @ K.transpose(-2, -1) # (1, 12, seq length, seq length)
 
         scores = scores / math.sqrt(HEAD_DIM)
 
@@ -165,9 +132,9 @@ class SelfAttention(nn.Module):
             dim=-1,
         )
 
-        context = probabilities @ V # (1, 12, max 128, 32)
+        context = probabilities @ V # (1, 12, seq length, 32)
 
-        context = context.transpose(1, 2) # (1, max 128, 12, 32)
+        context = context.transpose(1, 2) # (1, seq length, 12, 32)
 
         batch_size, seq_len, _, _ = context.shape
 
@@ -185,7 +152,7 @@ class AttentionOutput(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.dense = DynamicQuantizedLinear(
+        self.dense = nn.Linear(
             HIDDEN_SIZE,
             HIDDEN_SIZE,
         )
@@ -210,12 +177,12 @@ class FeedForward(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.dense1 = DynamicQuantizedLinear(
+        self.dense1 = nn.Linear(
             HIDDEN_SIZE,
             INTERMEDIATE_SIZE,
         )
 
-        self.dense2 = DynamicQuantizedLinear(
+        self.dense2 = nn.Linear(
             INTERMEDIATE_SIZE,
             HIDDEN_SIZE,
         )
@@ -308,16 +275,37 @@ class MiniLM(nn.Module):
         return x
 
 
-def _dequantize(tensors, quantized_name, zero_point_name):
-    scale_name = quantized_name.removesuffix("_quantized") + "_scale"
-    return (
-        tensors[quantized_name].astype(np.float32)
-        - tensors[zero_point_name].astype(np.float32)
-    ) * tensors[scale_name].astype(np.float32)
+class MeanPooling(nn.Module):
+    """Average token embeddings, excluding padding: (B, N, 384) -> (B, 384)."""
+
+    def forward(self, last_hidden_state, attention_mask=None):
+        if attention_mask is None:
+            return last_hidden_state.mean(dim=1)
+
+        mask = attention_mask.unsqueeze(-1).to(dtype=last_hidden_state.dtype)
+        summed = (last_hidden_state * mask).sum(dim=1)
+        return summed / mask.sum(dim=1).clamp(min=1)
+
+
+class SentenceEmbeddingModel(nn.Module):
+    """MiniLM encoder followed by mean pooling into one vector per sentence."""
+
+    def __init__(self, encoder):
+        super().__init__()
+        self.encoder = encoder
+        self.pooling = MeanPooling()
+
+    def forward(self, input_ids, attention_mask=None, token_type_ids=None):
+        last_hidden_state = self.encoder(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+        )
+        return self.pooling(last_hidden_state, attention_mask)
 
 
 def _linear_parameter_name(node_name):
-    parts = node_name.strip("/").removesuffix("/MatMul_quant").split("/")
+    parts = node_name.strip("/").removesuffix("/MatMul").split("/")
     layer = parts[1].removeprefix("layer.")
     module = "/".join(parts[2:])
     modules = {
@@ -332,12 +320,8 @@ def _linear_parameter_name(node_name):
 
 
 def _float_parameter_name(onnx_name):
-    embedding_names = {
-        "embeddings.LayerNorm.weight": "embeddings.layer_norm.weight",
-        "embeddings.LayerNorm.bias": "embeddings.layer_norm.bias",
-    }
-    if onnx_name in embedding_names:
-        return embedding_names[onnx_name]
+    if onnx_name.startswith("embeddings."):
+        return onnx_name.replace("embeddings.LayerNorm.", "embeddings.layer_norm.")
 
     parts = onnx_name.split(".")
     layer = parts[2]
@@ -358,42 +342,29 @@ def _float_parameter_name(onnx_name):
 
 
 def load_model_from_onnx(path: str | Path):
-    graph = onnx.load(str(path), load_external_data=False).graph
+    """Load the float32 ONNX encoder, transposing MatMul weights for nn.Linear."""
+    graph = onnx.load(str(path)).graph
     tensors = {
         initializer.name: numpy_helper.to_array(initializer)
         for initializer in graph.initializer
     }
     state_dict = {}
 
-    for name in ("word_embeddings", "position_embeddings", "token_type_embeddings"):
-        prefix = f"embeddings.{name}.weight"
-        value = _dequantize(
-            tensors,
-            f"{prefix}_quantized",
-            f"{prefix}_zero_point",
-        )
-        state_dict[f"embeddings.{name}.weight"] = torch.from_numpy(value.copy())
+    linear_weights = {}
+    for node in graph.node:
+        if node.op_type == "MatMul" and node.input[1] in tensors:
+            linear_weights[node.input[1]] = _linear_parameter_name(node.name)
 
     for initializer in graph.initializer:
         if initializer.data_type != onnx.TensorProto.FLOAT:
             continue
-        if initializer.name.endswith("_scale"):
+        if initializer.name in linear_weights:
             continue
         target = _float_parameter_name(initializer.name)
         state_dict[target] = torch.from_numpy(tensors[initializer.name].copy())
 
-    for node in graph.node:
-        if node.op_type != "MatMulInteger":
-            continue
-        prefix = _linear_parameter_name(node.name).removesuffix(".weight")
-        scale_name = node.input[1].removesuffix("_quantized") + "_scale"
-        state_dict[f"{prefix}.weight"] = torch.from_numpy(tensors[node.input[1]].copy())
-        state_dict[f"{prefix}.weight_scale"] = torch.from_numpy(
-            tensors[scale_name].copy()
-        )
-        state_dict[f"{prefix}.weight_zero_point"] = torch.from_numpy(
-            tensors[node.input[3]].copy()
-        )
+    for name, target in linear_weights.items():
+        state_dict[target] = torch.from_numpy(tensors[name].T.copy())
 
     with torch.device("meta"):
         model = MiniLM()
@@ -402,7 +373,7 @@ def load_model_from_onnx(path: str | Path):
 
 
 def main():
-    text = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_TEXT
+    text = input("Enter text (or press Enter to use default): ") or DEFAULT_TEXT
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     inputs = tokenizer(
         text,
@@ -413,14 +384,14 @@ def main():
     )
     inputs["token_type_ids"] = torch.zeros_like(inputs["input_ids"])
 
-    model = load_model_from_onnx(MODEL_PATH)
+    model = SentenceEmbeddingModel(load_model_from_onnx(MODEL_PATH)).eval()
     with torch.inference_mode():
-        last_hidden_state = model(**inputs)
+        sentence_embedding = model(**inputs)
 
     print("text:", text)
     print("input_ids:", tuple(inputs["input_ids"].shape))
-    print("last_hidden_state:", tuple(last_hidden_state.shape))
-    print("first_token[:8]:", last_hidden_state[0, 0, :8].numpy())
+    print("sentence_embedding:", tuple(sentence_embedding.shape))
+    print("sentence_embedding[:8]:", sentence_embedding[0, :8].numpy())
 
 
 if __name__ == "__main__":

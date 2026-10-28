@@ -1,105 +1,87 @@
-import os
 import unittest
 
 import numpy as np
-import onnx
 
-os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
-
-import onnxruntime as ort
-
-from model.numpy import config
-from model.numpy.embeddings import EMBED_FRAC_BITS, embeddings_fixed, prepare_embeddings
-from model.numpy.layernorm import (
-    LAYERNORM_OUT_FRAC_BITS,
-    layernorm_fixed,
-    prepare_layernorm,
-    prepare_rsqrt_lut,
-    rsqrt_fixed,
-)
-from model.numpy.weights import load_initializers
+from model.numpy.layers.int_layer_norm import OUTPUT_FRAC_BITS, IntLayerNorm
+from model.numpy.utils.quantize import symmetric_dequantize, symmetric_quantize
+from model.numpy.utils.rsqrt import prepare_rsqrt_lut, rsqrt_fixed
+from model.numpy.utils.scale_int12 import ScaleInt12
 
 
-EMBEDDING_SUM = "/embeddings/Add_1_output_0"
-EMBEDDING_OUT = "/embeddings/LayerNorm/LayerNormalization_output_0"
+PREFIX = "encoder.layer.0.output.LayerNorm"
+HIDDEN = 384
 
 
-class NumpyEmbeddingTest(unittest.TestCase):
+def float_layer_norm(codes, scale, weight, bias, eps=1e-12):
+    """Float64 reference: the IntLayerNorm formula before the integer rsqrt."""
+    centered = codes * codes.shape[-1] - codes.sum(axis=-1, keepdims=True)
+    variance = np.mean(centered.astype(np.float64) ** 2, axis=-1, keepdims=True)
+    denominator = np.sqrt(variance + eps * (codes.shape[-1] / float(scale)) ** 2)
+    return centered / denominator * weight + bias
+
+
+class IntLayerNormTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # Lấy thêm tensor trung gian của khối embedding làm chuẩn so sánh.
-        model = onnx.load(str(config.MODEL_PATH))
-        for name in (EMBEDDING_SUM, EMBEDDING_OUT):
-            model.graph.output.append(onnx.helper.make_value_info(name, onnx.TypeProto()))
-        cls.session = ort.InferenceSession(
-            model.SerializeToString(),
-            providers=["CPUExecutionProvider"],
+        # Ranges match the 25 LayerNorms of MiniLM: |gamma| <= 3.43, |beta| <= 1.82.
+        rng = np.random.default_rng(0)
+        cls.weight = rng.uniform(0.4, 3.5, HIDDEN)
+        cls.bias = rng.uniform(-1.8, 1.8, HIDDEN)
+        cls.layer_norm = IntLayerNorm(
+            {f"{PREFIX}.weight": cls.weight, f"{PREFIX}.bias": cls.bias}, prefix=PREFIX,
         )
 
-        tensors = load_initializers(config.MODEL_PATH)
-        cls.tables, cls.sum_bits = prepare_embeddings(tensors)
-        cls.gamma, cls.beta = prepare_layernorm(tensors, "embeddings.LayerNorm")
-        cls.lut = prepare_rsqrt_lut()
+        # Residual-like wide accumulators with a few outlier channels.
+        cls.cases = []
+        for degree in (14, 20, 26):
+            x = rng.normal(0, 1, (2, 32, HIDDEN))
+            x[..., rng.choice(HIDDEN, 3, replace=False)] *= 30
+            codes = np.rint(x * 0.01 * 2**degree).astype(np.int64)
+            cls.cases.append((codes, ScaleInt12.from_parts(1, degree, normalize=False)))
 
-        rng = np.random.default_rng(0)
-        cls.cases = [
-            [0, 87, 262, 9384, 2, 1],
-            [0, 14343, 4724, 1839, 15091, 7742, 6, 51006, 14849, 5, 2],
-            [0, 62, 54063, 25614, 14305, 2558, 13407, 9828, 216348, 1641, 3061, 3941, 32, 2],
-            rng.integers(0, 250037, 128).tolist(),
-        ]
-
-    def run_cases(self):
-        for input_ids in self.cases:
-            for token_type in (0, 1):
-                input_ids_np = np.array([input_ids], dtype=np.int64)
-                token_type_ids = np.full_like(input_ids_np, token_type)
-                expected_sum, expected_out = self.session.run(
-                    [EMBEDDING_SUM, EMBEDDING_OUT],
-                    {
-                        "input_ids": input_ids_np,
-                        "attention_mask": np.ones_like(input_ids_np),
-                        "token_type_ids": token_type_ids,
-                    },
+    def test_normalize_matches_float(self):
+        for codes, scale in self.cases:
+            with self.subTest(degree=scale.degree):
+                output = self.layer_norm.normalize(codes)
+                self.assertEqual(output.dtype, np.int32)
+                actual = output / (1 << OUTPUT_FRAC_BITS)
+                expected = float_layer_norm(codes, scale, self.weight, self.bias)
+                cosine = (actual * expected).sum(-1) / (
+                    np.linalg.norm(actual, axis=-1) * np.linalg.norm(expected, axis=-1)
                 )
-                x = embeddings_fixed(input_ids_np, token_type_ids, self.tables, self.sum_bits)
-                hidden = layernorm_fixed(x, self.gamma, self.beta, self.lut)
-
-                yield (len(input_ids), token_type), x, hidden, expected_sum, expected_out
-
-    def test_embedding_sum_matches_onnx(self):
-        for case, x, _, expected_sum, _ in self.run_cases():
-            with self.subTest(case=case):
-                self.assertTrue(np.issubdtype(x.dtype, np.integer))
-                actual = x / (1 << EMBED_FRAC_BITS)
-                self.assertLess(np.abs(actual - expected_sum).max(), 1e-5)
-
-    def test_embedding_layernorm_matches_onnx(self):
-        for case, _, hidden, _, expected_out in self.run_cases():
-            with self.subTest(case=case):
-                self.assertEqual(hidden.dtype, np.int32)
-                actual = hidden / (1 << LAYERNORM_OUT_FRAC_BITS)
-                cosine = (actual * expected_out).sum(-1) / (
-                    np.linalg.norm(actual, axis=-1) * np.linalg.norm(expected_out, axis=-1)
-                )
-                self.assertLess(np.abs(actual - expected_out).max(), 5e-4)
-                self.assertLess(np.abs(actual - expected_out).mean(), 1e-4)
+                self.assertLess(np.abs(actual - expected).max(), 2e-3)
+                self.assertLess(np.abs(actual - expected).mean(), 2e-4)
                 self.assertGreater(cosine.min(), 0.99999)
+
+    def test_int8_output_within_one_lsb(self):
+        for codes, scale in self.cases:
+            with self.subTest(degree=scale.degree):
+                quantized, output_scale = self.layer_norm((codes, scale))
+                self.assertEqual(quantized.dtype, np.int8)
+                self.assertIsInstance(output_scale, ScaleInt12)
+                expected_q, expected_scale = symmetric_quantize(
+                    float_layer_norm(codes, scale, self.weight, self.bias)
+                )
+                difference = np.abs(
+                    symmetric_dequantize(quantized, output_scale)
+                    - symmetric_dequantize(expected_q, expected_scale)
+                )
+                self.assertLessEqual(difference.max(), float(expected_scale) * 1.01)
 
     def test_rsqrt_relative_error(self):
         values = np.concatenate([
             np.arange(1, 5000),
             np.random.default_rng(1).integers(1, 1 << 47, 100000),
         ])
-        mantissa, shift = rsqrt_fixed(values, self.lut)
+        mantissa, shift = rsqrt_fixed(values, prepare_rsqrt_lut())
         relative = mantissa * np.exp2(-shift.astype(np.float64)) * np.sqrt(values) - 1
         self.assertLess(np.abs(relative).max(), 1e-4)
 
-    def test_layernorm_constant_vector_returns_beta(self):
-        x = np.full((1, 2, self.gamma.shape[0]), 12345, dtype=np.int32)
+    def test_constant_vector_returns_beta(self):
+        codes = np.full((1, 2, HIDDEN), 12345, dtype=np.int64)
         np.testing.assert_array_equal(
-            layernorm_fixed(x, self.gamma, self.beta, self.lut)[0, 0],
-            self.beta,
+            self.layer_norm.normalize(codes)[0, 0],
+            self.layer_norm.beta,
         )
 
 

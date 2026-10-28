@@ -1,24 +1,70 @@
-import os
 import sys
 from pathlib import Path
 
 import numpy as np
-import onnx
-
-
-os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
-
-import onnxruntime as ort
+import torch
 from transformers import AutoTokenizer
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from model.numpy.config import MODEL_PATH
+from model.numpy.model import SentenceEmbeddingModel as NumpyModel
+from model.numpy.utils.quantize import symmetric_dequantize
+from model.pytorch.main import (
+    MODEL_PATH as PYTORCH_MODEL_PATH,
+    SentenceEmbeddingModel as PytorchModel,
+    load_model_from_onnx,
+)
 
 
 MODEL_ID = "onnx-community/paraphrase-multilingual-MiniLM-L12-v2-ONNX"
-MODEL_PATH = Path(__file__).parent / "weights" / "model_int8.onnx"
 DEFAULT_TEXT = "Tôi đang làm đồ án FPGA."
 
 
+def percentage_errors(reference, actual, eps=1e-8):
+    """Mean and maximum error normalized by the full PyTorch tensor's range."""
+    reference = np.asarray(reference, dtype=np.float64)
+    actual = np.asarray(actual, dtype=np.float64)
+    if reference.shape != actual.shape:
+        raise ValueError(f"Shape mismatch: PyTorch {reference.shape}, NumPy {actual.shape}")
+    denominator = max(float(reference.max() - reference.min()), eps)
+    relative = 100 * np.abs(actual - reference) / denominator
+    return float(relative.mean()), float(relative.max())
+
+
+def trace_pytorch_embeddings(embeddings, input_ids, token_type_ids=None):
+    """Capture the same five stages as the NumPy BertEmbeddings trace."""
+    trace = {}
+    handles = []
+
+    def save_output(name):
+        def hook(module, args, output):
+            trace[name] = output.detach().cpu().numpy().copy()
+        return hook
+
+    def save_sum(module, args):
+        trace["embeddings.sum"] = args[0].detach().cpu().numpy().copy()
+
+    try:
+        for name, module in (
+            ("embeddings.word", embeddings.word_embeddings),
+            ("embeddings.position", embeddings.position_embeddings),
+            ("embeddings.token_type", embeddings.token_type_embeddings),
+            ("embeddings.output", embeddings.layer_norm),
+        ):
+            handles.append(module.register_forward_hook(save_output(name)))
+        handles.append(embeddings.layer_norm.register_forward_pre_hook(save_sum))
+        with torch.inference_mode():
+            embeddings(input_ids, token_type_ids)
+    finally:
+        for handle in handles:
+            handle.remove()
+    return trace
+
+
 def main():
-    text = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_TEXT
+    text = input("Enter text (or press Enter to use default): ") or DEFAULT_TEXT
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     inputs = tokenizer(
         text,
@@ -29,29 +75,55 @@ def main():
     )
     inputs["token_type_ids"] = np.zeros_like(inputs["input_ids"])
 
-    session = ort.InferenceSession(
-        str(MODEL_PATH),
-        providers=["CPUExecutionProvider"],
+    numpy_model = NumpyModel(MODEL_PATH, trace=True)
+    numpy_output = symmetric_dequantize(*numpy_model(**inputs))
+    pytorch_model = load_model_from_onnx(PYTORCH_MODEL_PATH)
+    with torch.inference_mode():
+        pytorch_output = PytorchModel(pytorch_model).eval()(
+            **{name: torch.from_numpy(value) for name, value in inputs.items()}
+        ).numpy()
+    pytorch_trace = trace_pytorch_embeddings(
+        pytorch_model.embeddings,
+        torch.from_numpy(inputs["input_ids"]),
+        torch.from_numpy(inputs["token_type_ids"]),
     )
-    model_inputs = {item.name: inputs[item.name] for item in session.get_inputs()}
-    last_hidden_state = session.run(None, model_inputs)[0]
 
     print("text:", text)
     print("input_ids:", inputs["input_ids"].shape)
-    print("last_hidden_state:", last_hidden_state.shape)
-    print("first_token[:8]:", last_hidden_state[0, 0, :8])
+    print(f"NumPy weights: {MODEL_PATH.name}; PyTorch float32 reference: {PYTORCH_MODEL_PATH.name}")
+    print("Both models use the same tokenized inputs.")
+    print("Error (%) = 100 * abs(NumPy - PyTorch) / max(max(PyTorch) - min(PyTorch), 1e-8)")
+    print(f"{'Layer':<24} {'Shape':<20} {'Mean error (%)':>18} {'Max error (%)':>18} {'MAE':>12} {'Max abs':>12}")
+    print("-" * 109)
+    for name in (
+        "embeddings.word",
+        "embeddings.position",
+        "embeddings.token_type",
+        "embeddings.sum",
+        "embeddings.output",
+    ):
+        reference = pytorch_trace[name]
+        mean_error, max_error = percentage_errors(reference, numpy_model.layers_output[name])
+        absolute = np.abs(numpy_model.layers_output[name].astype(np.float64) - reference)
+        print(f"{name:<24} {str(reference.shape):<20} {mean_error:18.8f} {max_error:18.8f} {absolute.mean():12.6g} {absolute.max():12.6g}")
 
-    model = onnx.load("weights/model_int8.onnx")
+    print("PyTorch max/min are computed over the full tensor of each layer.")
 
-    for init in model.graph.initializer:
-        name = init.name.lower()
+    # Sentence embeddings after all encoder layers and mean pooling.
+    mean_error, max_error = percentage_errors(pytorch_output, numpy_output)
+    absolute = np.abs(numpy_output - pytorch_output)
+    cosine = np.sum(numpy_output * pytorch_output, axis=-1) / (
+        np.linalg.norm(numpy_output, axis=-1) * np.linalg.norm(pytorch_output, axis=-1)
+    )
+    print("\n===== Sentence embedding =====")
+    print("PyTorch output[:8]:", pytorch_output[0, :8])
+    print("NumPy output[:8]:  ", numpy_output[0, :8])
+    print(f"Shape: {pytorch_output.shape}")
+    print(f"Mean error (%): {mean_error:.4f}")
+    print(f"Max error (%):  {max_error:.4f}")
+    print(f"MAE: {absolute.mean():.6g}   Max abs: {absolute.max():.6g}")
+    print(f"Cosine similarity: {cosine.min():.6f}")
 
-        if "embedding" in name:
-            print(
-                init.name,
-                "dtype =", init.data_type,
-                "shape =", init.dims,
-            )
 
 if __name__ == "__main__":
     main()
