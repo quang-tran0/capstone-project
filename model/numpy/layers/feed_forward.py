@@ -1,7 +1,5 @@
-import numpy as np
-
 from ..config import NUM_LAYERS
-from ..utils.fixed import to_float
+from ..utils.fixed import WIDE_BITS
 from ..utils.gelu import gelu_fixed, prepare_phi_lut
 from .int_layer_norm import IntLayerNorm
 from .linear import Linear
@@ -35,8 +33,9 @@ class FeedForward:
 
     def __call__(self, hidden_states):
         # GELU works on the Q.16 accumulator output, before any INT8 rounding.
-        activation = gelu_fixed(self.dense1(hidden_states), self.phi_lut)
+        activation = gelu_fixed(self.dense1(hidden_states), self.phi_lut).resize(
+            WIDE_BITS, name="GELU output")
         if self.trace and self.layers_output is not None:
-            self.layers_output[f"{self.prefix}.intermediate.gelu.output"] = to_float(activation)
+            self.layers_output[f"{self.prefix}.intermediate.gelu.output"] = activation.to_float()
         projected = self.dense2(activation)
-        return self.layer_norm(projected.astype(np.int64) + hidden_states)
+        return self.layer_norm(projected + hidden_states)

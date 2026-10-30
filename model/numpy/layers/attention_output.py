@@ -1,5 +1,3 @@
-import numpy as np
-
 from ..config import NUM_LAYERS
 from .int_layer_norm import IntLayerNorm
 from .linear import Linear
@@ -25,4 +23,4 @@ class AttentionOutput:
     def __call__(self, attention_output, hidden_states):
         projected = self.dense(attention_output)
         # Both operands are Q.16, so the residual is a plain integer add.
-        return self.layer_norm(projected.astype(np.int64) + hidden_states)
+        return self.layer_norm(projected + hidden_states)

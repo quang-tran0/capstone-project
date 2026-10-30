@@ -20,12 +20,71 @@ from model.pytorch.main import (
 
 
 MODEL_ID = "onnx-community/paraphrase-multilingual-MiniLM-L12-v2-ONNX"
+REPORT_PATH = Path(__file__).resolve().parent / "report.md"
 DEFAULT_TEXT = "Tôi đang làm đồ án FPGA."
 DEFAULT_PASSAGES = (
-    "Đồ án dùng bo mạch KV260 để tăng tốc mô hình nhúng câu.",
-    "AXI hỗ trợ nhiều giao dịch outstanding nhờ ID của từng giao dịch.",
-    "Hôm nay trời mưa nên tôi ở nhà đọc sách.",
-    "Systolic array thực hiện phép nhân ma trận INT8 trên FPGA.",
+    # FPGA / phần cứng
+    "Đồ án dùng bo mạch Kria KV260 để tăng tốc mô hình nhúng câu MiniLM. Phần mềm trên ARM gửi "
+    "token xuống phần cứng qua AXI, bộ tăng tốc tính toàn bộ 12 lớp encoder rồi trả về vector "
+    "384 chiều để so khớp với cơ sở dữ liệu văn bản.",
+    "Giao thức AXI4 tách kênh địa chỉ, dữ liệu và phản hồi, nên master có thể phát nhiều giao dịch "
+    "outstanding mà không cần chờ giao dịch trước hoàn tất. Mỗi giao dịch mang một ID, và slave "
+    "được phép trả kết quả không theo thứ tự giữa các ID khác nhau.",
+    "Systolic array là lưới các phần tử xử lý, mỗi phần tử nhân hai số INT8 rồi cộng dồn vào thanh "
+    "ghi 32 bit. Dữ liệu chảy qua mảng theo nhịp clock nên phép nhân ma trận lớn được chia thành "
+    "các tile và tận dụng tối đa DSP trên FPGA.",
+    "Sau bước place-and-route, Vivado tạo báo cáo timing cho từng đường dữ liệu. Kỹ sư cần kiểm "
+    "tra worst negative slack của setup, hold và pulse width; nếu slack âm thì phải thêm tầng "
+    "pipeline hoặc tối ưu lại logic thay vì giảm tần số clock.",
+    "Lượng tử hóa INT8 thay số thực 32 bit bằng số nguyên 8 bit kèm hệ số tỉ lệ. Cách này giảm bốn "
+    "lần dung lượng trọng số, tiết kiệm băng thông bộ nhớ và cho phép mỗi khối DSP thực hiện nhiều "
+    "phép nhân hơn, đổi lại một sai số nhỏ so với mô hình gốc.",
+    # Luật dân sự
+    "Theo Bộ luật Dân sự, hợp đồng là sự thỏa thuận giữa các bên về việc xác lập, thay đổi hoặc "
+    "chấm dứt quyền, nghĩa vụ dân sự. Hợp đồng có hiệu lực từ thời điểm giao kết, trừ khi các bên "
+    "có thỏa thuận khác hoặc luật có quy định khác về thời điểm có hiệu lực.",
+    "Người nào có lỗi cố ý hoặc vô ý xâm phạm tính mạng, sức khỏe, danh dự, nhân phẩm, uy tín, tài "
+    "sản hoặc quyền, lợi ích hợp pháp khác của người khác mà gây thiệt hại thì phải bồi thường. "
+    "Thiệt hại được bồi thường toàn bộ và kịp thời, trừ trường hợp các bên có thỏa thuận khác.",
+    "Thời hiệu khởi kiện để yêu cầu Tòa án giải quyết tranh chấp hợp đồng là ba năm, kể từ ngày "
+    "người có quyền yêu cầu biết hoặc phải biết quyền và lợi ích hợp pháp của mình bị xâm phạm. "
+    "Hết thời hiệu, người khởi kiện có thể mất quyền yêu cầu Tòa án bảo vệ.",
+    "Di sản thừa kế được chia theo di chúc nếu người chết để lại di chúc hợp pháp. Khi không có di "
+    "chúc hoặc di chúc không hợp pháp, di sản được chia theo pháp luật cho những người thừa kế cùng "
+    "hàng, trong đó hàng thứ nhất gồm vợ, chồng, cha mẹ và con của người chết.",
+    "Giao dịch dân sự do người chưa thành niên xác lập, thực hiện mà theo quy định phải có người đại "
+    "diện đồng ý nhưng lại không có sự đồng ý đó thì có thể bị Tòa án tuyên bố vô hiệu theo yêu cầu "
+    "của người đại diện. Khi giao dịch vô hiệu, các bên phải hoàn trả cho nhau những gì đã nhận.",
+    # Chủ đề khác
+    "Hôm nay trời mưa từ sáng sớm nên tôi quyết định ở nhà đọc sách. Tôi pha một ấm trà nóng, ngồi "
+    "cạnh cửa sổ nghe tiếng mưa rơi và đọc hết cuốn tiểu thuyết mà bạn tặng từ tháng trước.",
+    "Phở bò Hà Nội nổi tiếng với nước dùng trong, được ninh nhiều giờ từ xương bò cùng quế, hồi, "
+    "thảo quả và gừng nướng. Bát phở ngon cần bánh phở mềm, thịt bò thái mỏng và thêm hành lá, "
+    "rau thơm khi ăn.",
+    "Đội tuyển bóng đá Việt Nam giành chiến thắng trong trận chung kết sau khi ghi bàn quyết định ở "
+    "những phút cuối. Hàng nghìn cổ động viên đổ ra đường ăn mừng, cờ đỏ sao vàng rợp khắp các "
+    "tuyến phố trung tâm.",
+    "Giá vàng trong nước tăng mạnh theo xu hướng của thị trường thế giới khi nhà đầu tư tìm đến "
+    "kênh trú ẩn an toàn. Chênh lệch giữa giá mua và giá bán cũng bị nới rộng, khiến người mua "
+    "ngắn hạn dễ chịu lỗ.",
+    "Vịnh Hạ Long ở Quảng Ninh có gần hai nghìn hòn đảo đá vôi với nhiều hang động đẹp. Nơi đây "
+    "được UNESCO công nhận là di sản thiên nhiên thế giới và thu hút du khách bằng các chuyến du "
+    "thuyền ngủ đêm trên vịnh.",
+    "Để giữ sức khỏe, mỗi người nên uống đủ nước, ngủ từ bảy đến tám tiếng mỗi đêm và tập thể dục "
+    "đều đặn. Chế độ ăn nhiều rau xanh, hạn chế đồ ngọt và đồ chiên rán cũng giúp giảm nguy cơ mắc "
+    "các bệnh mãn tính.",
+    "Học sinh lớp mười hai đang tập trung ôn tập cho kỳ thi tốt nghiệp trung học phổ thông. Nhiều "
+    "trường tổ chức thi thử, còn phụ huynh thì chuẩn bị bữa ăn đầy đủ dinh dưỡng để con có sức "
+    "khỏe tốt trong mùa thi.",
+    "Mèo là loài vật ngủ rất nhiều, trung bình từ mười hai đến mười sáu tiếng mỗi ngày. Chúng "
+    "thường hoạt động mạnh vào lúc sáng sớm và chiều tối, phần còn lại trong ngày dành để nghỉ "
+    "ngơi và chải lông.",
+    "Thành phố Hồ Chí Minh thường xuyên bị ngập khi triều cường dâng cao kết hợp với mưa lớn. "
+    "Nhiều tuyến đường biến thành sông, xe máy chết máy giữa đường và người dân phải chờ nước rút "
+    "mới có thể đi tiếp.",
+    "Python là ngôn ngữ lập trình phổ biến trong học máy nhờ cú pháp dễ đọc và hệ sinh thái thư "
+    "viện phong phú. Các thư viện như NumPy, PyTorch và scikit-learn giúp xây dựng, huấn luyện và "
+    "đánh giá mô hình nhanh chóng.",
 )
 
 
@@ -40,8 +99,36 @@ def percentage_errors(reference, actual, eps=1e-8):
     return float(relative.mean()), float(relative.max())
 
 
-def trace_pytorch_embeddings(embeddings, input_ids, token_type_ids=None):
-    """Capture the same five stages as the NumPy BertEmbeddings trace."""
+def traced_modules(encoder):
+    """(NumPy trace name, PyTorch module) pairs, in forward order."""
+    embeddings = encoder.embeddings
+    modules = [
+        ("embeddings.word", embeddings.word_embeddings),
+        ("embeddings.position", embeddings.position_embeddings),
+        ("embeddings.token_type", embeddings.token_type_embeddings),
+        ("embeddings.output", embeddings.layer_norm),
+    ]
+    for index, layer in enumerate(encoder.layers):
+        prefix = f"encoder.layer.{index}"
+        modules += [
+            (f"{prefix}.attention.self.query.output", layer.self_attention.query),
+            (f"{prefix}.attention.self.key.output", layer.self_attention.key),
+            (f"{prefix}.attention.self.value.output", layer.self_attention.value),
+            (f"{prefix}.attention.self.output", layer.self_attention),
+            (f"{prefix}.attention.output.dense.output", layer.attention_output.dense),
+            (f"{prefix}.attention.output.LayerNorm.output", layer.attention_output.layer_norm),
+            (f"{prefix}.intermediate.dense.output", layer.ffn.dense1),
+            (f"{prefix}.intermediate.gelu.output", layer.ffn.gelu),
+            (f"{prefix}.output.dense.output", layer.ffn.dense2),
+            (f"{prefix}.output.LayerNorm.output", layer.ffn.layer_norm),
+            (f"{prefix}.output", layer),
+        ]
+    return modules
+
+
+def trace_pytorch(sentence_model, inputs):
+    """Capture the same stages the NumPy model records with trace=True."""
+    encoder = sentence_model.encoder
     trace = {}
     handles = []
 
@@ -54,20 +141,52 @@ def trace_pytorch_embeddings(embeddings, input_ids, token_type_ids=None):
         trace["embeddings.sum"] = args[0].detach().cpu().numpy().copy()
 
     try:
-        for name, module in (
-            ("embeddings.word", embeddings.word_embeddings),
-            ("embeddings.position", embeddings.position_embeddings),
-            ("embeddings.token_type", embeddings.token_type_embeddings),
-            ("embeddings.output", embeddings.layer_norm),
-        ):
+        for name, module in traced_modules(encoder):
             handles.append(module.register_forward_hook(save_output(name)))
-        handles.append(embeddings.layer_norm.register_forward_pre_hook(save_sum))
+        handles.append(encoder.embeddings.layer_norm.register_forward_pre_hook(save_sum))
+        handles.append(encoder.register_forward_hook(save_output("encoder.output")))
+        handles.append(sentence_model.pooling.register_forward_hook(save_output("pooling.output")))
         with torch.inference_mode():
-            embeddings(input_ids, token_type_ids)
+            sentence_model(**{name: torch.from_numpy(value) for name, value in inputs.items()})
     finally:
         for handle in handles:
             handle.remove()
     return trace
+
+
+def markdown_table(headers, rows, align):
+    """align: one of 'l'/'r' per column."""
+    def cell(value):
+        return str(value).replace("|", "\\|").replace("\n", " ")
+
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---:" if a == "r" else ":---" for a in align) + " |",
+    ]
+    lines += ["| " + " | ".join(cell(value) for value in row) + " |" for row in rows]
+    return "\n".join(lines)
+
+
+def error_row(name, reference, actual):
+    reference = np.asarray(reference, dtype=np.float64)
+    actual = np.asarray(actual, dtype=np.float64)
+    mean_error, max_error = percentage_errors(reference, actual)
+    absolute = np.abs(actual - reference)
+    cosine = cosine_similarity(actual.ravel(), reference.ravel())
+    return [f"`{name}`", str(reference.shape), f"{mean_error:.4f}", f"{max_error:.4f}",
+            f"{absolute.mean():.5g}", f"{absolute.max():.5g}", f"{cosine:.6f}"]
+
+
+ERROR_HEADERS = ["Layer", "Shape", "Mean err (%)", "Max err (%)", "MAE", "Max abs", "Cosine"]
+ERROR_ALIGN = "llrrrrr"
+
+
+def ranking_table(scores, passages):
+    rows = [
+        [rank, index + 1, f"{scores[index]:.5f}", passages[index]]
+        for rank, index in enumerate(np.argsort(-scores, kind="stable"), start=1)
+    ]
+    return markdown_table(["Hạng", "#", "Cosine", "Passage"], rows, "rrrl")
 
 
 def read_passages():
@@ -124,77 +243,123 @@ def main():
     numpy_fixed = np.stack(numpy_fixed)
     numpy_outputs = to_float(numpy_fixed)
 
-    # Re-run the query alone so the NumPy trace matches the embedding table below.
-    numpy_model(**inputs)
-    pytorch_output, numpy_output = pytorch_outputs[:1], numpy_outputs[:1]
-    pytorch_trace = trace_pytorch_embeddings(
-        pytorch_model.embeddings,
-        torch.from_numpy(inputs["input_ids"]),
-        torch.from_numpy(inputs["token_type_ids"]),
-    )
-
-    print("text:", text)
-    print("input_ids:", inputs["input_ids"].shape)
-    print(f"NumPy weights: {MODEL_PATH.name}; PyTorch float32 reference: {PYTORCH_MODEL_PATH.name}")
-    print("Both models use the same tokenized inputs.")
-    print("Error (%) = 100 * abs(NumPy - PyTorch) / max(max(PyTorch) - min(PyTorch), 1e-8)")
-    print(f"{'Layer':<24} {'Shape':<20} {'Mean error (%)':>18} {'Max error (%)':>18} {'MAE':>12} {'Max abs':>12}")
-    print("-" * 109)
-    for name in (
-        "embeddings.word",
-        "embeddings.position",
-        "embeddings.token_type",
-        "embeddings.sum",
-        "embeddings.output",
-    ):
-        reference = pytorch_trace[name]
-        mean_error, max_error = percentage_errors(reference, numpy_model.layers_output[name])
-        absolute = np.abs(numpy_model.layers_output[name].astype(np.float64) - reference)
-        print(f"{name:<24} {str(reference.shape):<20} {mean_error:18.8f} {max_error:18.8f} {absolute.mean():12.6g} {absolute.max():12.6g}")
-
-    print("PyTorch max/min are computed over the full tensor of each layer.")
-
-    # Sentence embeddings after all encoder layers and mean pooling.
-    mean_error, max_error = percentage_errors(pytorch_output, numpy_output)
-    absolute = np.abs(numpy_output - pytorch_output)
-    cosine = np.sum(numpy_output * pytorch_output, axis=-1) / (
-        np.linalg.norm(numpy_output, axis=-1) * np.linalg.norm(pytorch_output, axis=-1)
-    )
-    print("\n===== Sentence embedding (query) =====")
-    print("PyTorch output[:8]:", pytorch_output[0, :8])
-    print("NumPy output[:8]:  ", numpy_output[0, :8])
-    print(f"Shape: {pytorch_output.shape}")
-    print(f"Mean error (%): {mean_error:.4f}")
-    print(f"Max error (%):  {max_error:.4f}")
-    print(f"MAE: {absolute.mean():.6g}   Max abs: {absolute.max():.6g}")
-    print(f"Cosine similarity: {cosine.min():.6f}")
-
-    print("\n===== Sentence embeddings, all texts =====")
-    print(f"{'#':<3} {'Mean error (%)':>15} {'Max error (%)':>14} {'Cosine':>10}  Text")
-    for index, sentence in enumerate(texts):
-        mean_error, max_error = percentage_errors(pytorch_outputs[index], numpy_outputs[index])
-        print(f"{index:<3} {mean_error:15.4f} {max_error:14.4f} "
-              f"{cosine_similarity(pytorch_outputs[index], numpy_outputs[index]):10.6f}  {sentence}")
-
     # RAG score: cosine(query, passage). NumPy uses the integer cosine in Q.15.
     pytorch_scores = np.array([cosine_similarity(pytorch_outputs[0], passage) for passage in pytorch_outputs[1:]])
     numpy_scores = cosine_fixed(numpy_fixed[:1], numpy_fixed[1:]) / (1 << SCORE_FRAC_BITS)
     pytorch_rank = np.argsort(-pytorch_scores, kind="stable")
     numpy_rank = np.argsort(-numpy_scores, kind="stable")
 
-    print("\n===== RAG scores: cosine(query, passage) =====")
-    print("Score error (%) = 100 * abs(NumPy - PyTorch) / abs(PyTorch)")
-    print(f"{'#':<3} {'PyTorch':>9} {'NumPy':>9} {'Abs error':>10} {'Error (%)':>10} "
-          f"{'Rank PT':>8} {'Rank NP':>8}  Passage")
-    for index, passage in enumerate(passages):
-        difference = abs(numpy_scores[index] - pytorch_scores[index])
-        print(f"{index + 1:<3} {pytorch_scores[index]:9.5f} {numpy_scores[index]:9.5f} "
-              f"{difference:10.5f} {100 * difference / max(abs(pytorch_scores[index]), 1e-8):10.4f} "
-              f"{int(np.where(pytorch_rank == index)[0][0]) + 1:8d} "
-              f"{int(np.where(numpy_rank == index)[0][0]) + 1:8d}  {passage}")
-    errors = np.abs(numpy_scores - pytorch_scores)
-    print(f"Mean abs score error: {errors.mean():.5f}   Max abs score error: {errors.max():.5f}")
-    print("Ranking identical:", bool(np.array_equal(pytorch_rank, numpy_rank)))
+    # Re-run the query alone so both traces describe the same forward pass.
+    numpy_model(**inputs)
+    pytorch_trace = trace_pytorch(sentence_model, inputs)
+
+    score_errors = np.abs(numpy_scores - pytorch_scores)
+    score_range = max(float(pytorch_scores.max() - pytorch_scores.min()), 1e-8)
+    ranking_identical = bool(np.array_equal(pytorch_rank, numpy_rank))
+    embedding_cosines = [cosine_similarity(p, n) for p, n in zip(pytorch_outputs, numpy_outputs)]
+    pytorch_position = {int(index): rank for rank, index in enumerate(pytorch_rank, start=1)}
+    numpy_position = {int(index): rank for rank, index in enumerate(numpy_rank, start=1)}
+
+    report = [
+        "# So sánh NumPy (integer) với PyTorch (float32)",
+        "",
+        markdown_table(["Mục", "Giá trị"], [
+            ["Query", text],
+            ["Số token của query", inputs["input_ids"].shape[1]],
+            ["Số passage", len(passages)],
+            ["Trọng số", f"`{MODEL_PATH.name}` (cả hai model, cùng tokenizer)"],
+            ["Thứ hạng giống nhau", "Có" if ranking_identical else "**Không**"],
+            ["Sai số score tuyệt đối (mean / max)", f"{score_errors.mean():.5f} / {score_errors.max():.5f}"],
+            ["Cosine embedding nhỏ nhất (PyTorch vs NumPy)", f"{min(embedding_cosines):.6f}"],
+        ], "ll"),
+        "",
+        "## 1. Kết quả query",
+        "",
+        "### PyTorch (float32)",
+        "",
+        ranking_table(pytorch_scores, passages),
+        "",
+        "### NumPy (integer)",
+        "",
+        ranking_table(numpy_scores, passages),
+        "",
+        "## 2. Sai số chi tiết",
+        "",
+        "Error (%) = 100 · |NumPy − PyTorch| / max(max(PyTorch) − min(PyTorch), 1e-8); "
+        "max/min lấy trên toàn bộ tensor (hoặc toàn bộ cột score) của PyTorch.",
+        "",
+        "### 2.1. RAG score: cosine(query, passage)",
+        "",
+        markdown_table(
+            ["#", "PyTorch", "NumPy", "Abs error", "Error (%)", "Hạng PT", "Hạng NP", "Passage"],
+            [
+                [index + 1, f"{pytorch_scores[index]:.5f}", f"{numpy_scores[index]:.5f}",
+                 f"{score_errors[index]:.5f}", f"{100 * score_errors[index] / score_range:.4f}",
+                 pytorch_position[index],
+                 numpy_position[index] if numpy_position[index] == pytorch_position[index]
+                 else f"**{numpy_position[index]}**",
+                 passage]
+                for index, passage in enumerate(passages)
+            ],
+            "rrrrrrrl",
+        ),
+        "",
+        "### 2.2. Sentence embedding của từng text",
+        "",
+        "Text #0 là query.",
+        "",
+        markdown_table(
+            ["#", "Mean err (%)", "Max err (%)", "MAE", "Max abs", "Cosine", "Text"],
+            [
+                [index, *(f"{value:.4f}" for value in percentage_errors(pytorch_outputs[index], numpy_outputs[index])),
+                 f"{np.abs(numpy_outputs[index] - pytorch_outputs[index]).mean():.5g}",
+                 f"{np.abs(numpy_outputs[index] - pytorch_outputs[index]).max():.5g}",
+                 f"{embedding_cosines[index]:.6f}", sentence]
+                for index, sentence in enumerate(texts)
+            ],
+            "rrrrrrl",
+        ),
+        "",
+        "8 giá trị đầu của embedding query:",
+        "",
+        markdown_table(
+            ["", *(f"[{i}]" for i in range(8))],
+            [["PyTorch", *(f"{v:.5f}" for v in pytorch_outputs[0, :8])],
+             ["NumPy", *(f"{v:.5f}" for v in numpy_outputs[0, :8])]],
+            "l" + "r" * 8,
+        ),
+        "",
+        "### 2.3. Sai số theo layer (query)",
+        "",
+        "Tóm tắt output của từng khối:",
+        "",
+    ]
+    summary = ["embeddings.output", *(f"encoder.layer.{i}.output" for i in range(len(pytorch_model.layers))),
+               "pooling.output"]
+    report.append(markdown_table(
+        ERROR_HEADERS,
+        [error_row(name, pytorch_trace[name], numpy_model.layers_output[name]) for name in summary],
+        ERROR_ALIGN,
+    ))
+
+    groups = {"embeddings": []}
+    for name in pytorch_trace:
+        if name.startswith("encoder.layer."):
+            groups.setdefault(".".join(name.split(".")[:3]), []).append(name)
+        elif name.startswith("embeddings."):
+            groups["embeddings"].append(name)
+    for group, names in groups.items():
+        report += ["", f"#### `{group}`", "", markdown_table(
+            ERROR_HEADERS,
+            [error_row(name.removeprefix(f"{group}."), pytorch_trace[name], numpy_model.layers_output[name])
+             for name in names],
+            ERROR_ALIGN,
+        )]
+
+    REPORT_PATH.write_text("\n".join(report) + "\n", encoding="utf-8")
+    print(f"Ranking identical: {ranking_identical}; "
+          f"max abs score error: {score_errors.max():.5f}")
+    print(f"Report written to {REPORT_PATH}")
 
 
 if __name__ == "__main__":

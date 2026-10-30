@@ -5,7 +5,6 @@ from .weights import load_initializers
 from .layers.bert_embedding import BertEmbeddings
 from .layers.encoder_layer import EncoderLayer
 from .layers.mean_pooling import MeanPooling
-from .utils.fixed import to_float
 
 
 class SentenceEmbeddingModel:
@@ -26,7 +25,7 @@ class SentenceEmbeddingModel:
         self.pooling = MeanPooling()
 
     def __call__(self, input_ids, attention_mask=None, token_type_ids=None):
-        """Return Q.16 np.int32 sentence embeddings of shape (B, 384)."""
+        """Return Q.16 sentence embeddings of shape (B, 384) as raw np.int32."""
         input_ids = np.asarray(input_ids)
         if input_ids.ndim != 2 or 0 in input_ids.shape:
             raise ValueError("input_ids must have non-empty shape (B, N)")
@@ -45,10 +44,10 @@ class SentenceEmbeddingModel:
         result = self.pooling(hidden_states, attention_mask)
         if self.trace:
             self.layers_output.update({
-                "encoder.output": to_float(hidden_states),
-                "pooling.output": to_float(result),
+                "encoder.output": hidden_states.to_float(),
+                "pooling.output": result.to_float(),
             })
-        return result
+        return result.raw.astype(np.int32)
 
     def display_trace(self):
         for name, value in self.layers_output.items():

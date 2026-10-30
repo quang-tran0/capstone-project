@@ -1,84 +1,54 @@
+from functools import lru_cache
+
 import numpy as np
 
-from .fixed import FRAC_BITS, round_shift
+from ..hwtypes import Fixed, QTensor, ScaleFormat
 
 
-# A scale is m * 2**-n with m in [1, 127] (INT8) and n in [0, 31] (UINT5).
+# A scale is m * 2**-n with m in [1, 127] (7 bits) and n in [0, 31] (5 bits).
 # Per-channel weight scales go below 2**-15, so n needs five bits.
-MULTIPLIER_MAX = 127
-DEGREE_MAX = 31
+SCALE_FORMAT = ScaleFormat(m_bits=7, n_bits=5)
+CODE_BITS = 8
 
-# x / 127 as a multiplication by 1/127 in Q.24, rounded up so the scale
-# never falls below peak / 127.
-RECIP_127_BITS = 24
-RECIP_127 = -(-(1 << RECIP_127_BITS) // MULTIPLIER_MAX)
-
-# 1/m in Q.22 for m in [1, 127]; entry 0 is unused.
+# 1/m in Q.22 for m in [1, m_max]; entry 0 is unused.
 RECIP_M_BITS = 22
-RECIP_M_LUT = np.array(
-    [0] + [round((1 << RECIP_M_BITS) / m) for m in range(1, MULTIPLIER_MAX + 1)],
-    dtype=np.int64,
-)
 
 
-def quantize_weight(weight, axis=0):
-    """Offline: symmetric INT8 with one scale per slice, reducing over `axis`.
+def code_max(code_bits=CODE_BITS):
+    """Symmetric codes use [-code_max, code_max], e.g. 127 for INT8."""
+    return (1 << (code_bits - 1)) - 1
 
-    Returns codes and the (m, n) scale fields, kept broadcastable to weight.
+
+@lru_cache
+def reciprocal_m_lut(m_bits=SCALE_FORMAT.m_bits):
+    """Offline: ROM of 1/m in Q.RECIP_M_BITS, addressed by m."""
+    values = [0] + [round((1 << RECIP_M_BITS) / m) for m in range(1, 1 << m_bits)]
+    return Fixed(values, RECIP_M_BITS + 1, signed=False)
+
+
+def quantize_weight(weight, axis=0, scale_format=SCALE_FORMAT, code_bits=CODE_BITS):
+    """Offline: symmetric codes with one scale per slice, reducing over `axis`.
+
+    The scale fields stay broadcastable to the weight. Rounding m up keeps the
+    peak at or below code_max, so nothing is clipped.
     """
+    limit = code_max(code_bits)
     weight = np.asarray(weight, dtype=np.float32)
-    scale = np.abs(weight).max(axis=axis, keepdims=True).astype(np.float64) / MULTIPLIER_MAX
-    scale = np.maximum(scale, 2.0**-DEGREE_MAX)
+    peak = np.abs(weight).max(axis=axis, keepdims=True).astype(np.float64)
+    scale = scale_format.from_float(peak / limit)
 
-    # Largest n whose multiplier still fits INT8. Rounding m up keeps the
-    # peak at or below code 127, so nothing is clipped.
-    degree = np.clip(np.floor(np.log2(MULTIPLIER_MAX / scale)), 0, DEGREE_MAX)
-    degree = np.where(np.ceil(scale * 2.0**degree) > MULTIPLIER_MAX, degree - 1, degree)
-    multiplier = np.maximum(np.ceil(scale * 2.0**degree), 1)
-
-    step = (multiplier * 2.0**-degree).astype(np.float32)
-    codes = np.clip(np.rint(weight / step), -MULTIPLIER_MAX, MULTIPLIER_MAX)
-    return codes.astype(np.int8), multiplier.astype(np.int64), degree.astype(np.int64)
+    step = scale.to_float().astype(np.float32)
+    codes = np.clip(np.rint(weight / step), -limit, limit).astype(np.int64)
+    return QTensor(Fixed(codes, code_bits), scale)
 
 
-def scale_from_peak(peak, frac_bits=FRAC_BITS):
-    """Scale fields (m, n) with m * 2**-n ~= peak * 2**-frac_bits / 127.
+def quantize(x, axis=-1, scale_format=SCALE_FORMAT, code_bits=CODE_BITS):
+    """Runtime, integer-only: symmetric codes of a Fixed with one scale per slice along axis.
 
-    The largest n whose multiplier fits INT8 is chosen, like a priority
-    encoder over the 32 candidates. m is rounded up so the peak maps to a
-    code <= 127. A zero peak gets the smallest scale.
+    codes = x / (m * 2**-n), using the 1/m ROM instead of a divider.
     """
-    peak = np.asarray(peak, dtype=np.int64)
-    scaled = peak * RECIP_127
-
-    # Ceiling shift: (v + 2**k - 1) >> k.
-    shifts = frac_bits + RECIP_127_BITS - np.arange(DEGREE_MAX + 1)
-    candidates = (scaled[..., None] + (np.int64(1) << shifts) - 1) >> shifts
-    fits = candidates <= MULTIPLIER_MAX
-    if not fits[..., 0].all():
-        raise OverflowError("Peak too large for an INT8 multiplier at n = 0")
-
-    degree = fits.sum(axis=-1) - 1
-    multiplier = np.take_along_axis(candidates, degree[..., None], axis=-1)[..., 0]
-
-    zero = multiplier == 0
-    return np.where(zero, 1, multiplier), np.where(zero, DEGREE_MAX, degree)
-
-
-def quantize_fixed(x, axis=-1, frac_bits=FRAC_BITS):
-    """Symmetric INT8 of a Q.frac_bits tensor with one scale per slice along axis.
-
-    codes = x * 2**-frac_bits / (m * 2**-n), with 1/m from RECIP_M_LUT.
-    """
-    x = np.asarray(x, dtype=np.int64)
-    peak = np.abs(x).max(axis=axis, keepdims=True)
-    multiplier, degree = scale_from_peak(peak, frac_bits)
-
-    codes = round_shift(x * RECIP_M_LUT[multiplier], RECIP_M_BITS + frac_bits - degree)
-    codes = np.clip(codes, -MULTIPLIER_MAX, MULTIPLIER_MAX)
-    return codes.astype(np.int8), multiplier, degree
-
-
-def dequantize(codes, multiplier, degree):
-    """Debug/trace only: codes * m * 2**-n as float64."""
-    return np.asarray(codes, dtype=np.float64) * multiplier * np.exp2(-np.asarray(degree, dtype=np.float64))
+    limit = code_max(code_bits)
+    scale = scale_format.from_peak(abs(x).max(axis=axis, keepdims=True), limit)
+    recip = reciprocal_m_lut(scale_format.m_bits)[scale.m]
+    codes = (x * recip).round_shift(RECIP_M_BITS + x.frac - scale.n, frac=0)
+    return QTensor(codes.clip(-limit, limit).resize(code_bits), scale)

@@ -3,16 +3,21 @@ import math
 import numpy as np
 
 from ..config import HEAD_DIM, HIDDEN_SIZE, NUM_HEADS, NUM_LAYERS
-from ..utils.fixed import FRAC_BITS, check_bits, round_shift, to_float
-from ..utils.int_quantize import quantize_fixed
+from ..hwtypes import Fixed, Scale
+from ..utils.fixed import FRAC_BITS, WIDE_BITS
+from ..utils.int_quantize import quantize
 from ..utils.reciprocal import prepare_reciprocal_lut, reciprocal_fixed
-from ..utils.softmax import EXP2_FRAC_BITS, PROBABILITY_MAX, prepare_exp2_lut, softmax_fixed
+from ..utils.softmax import PROBABILITY_MAX, prepare_exp2_lut, softmax_fixed
 from .linear import Linear
 
 
-# 1/sqrt(HEAD_DIM) in Q.15, folded into the score rescale.
+# 1/sqrt(HEAD_DIM) as a constant scale m * 2**-15, folded into the score rescale.
 INV_SQRT_HEAD_DIM_BITS = 15
-INV_SQRT_HEAD_DIM = round((1 << INV_SQRT_HEAD_DIM_BITS) / math.sqrt(HEAD_DIM))
+INV_SQRT_HEAD_DIM = Scale.const(
+    round((1 << INV_SQRT_HEAD_DIM_BITS) / math.sqrt(HEAD_DIM)), INV_SQRT_HEAD_DIM_BITS,
+)
+SCORE_ACCUMULATOR_BITS = 20
+CONTEXT_ACCUMULATOR_BITS = 22
 
 
 class SelfAttention:
@@ -49,16 +54,15 @@ class SelfAttention:
 
     def __call__(self, hidden_states, attention_mask=None):
         """
-        hidden_states: Q.16 (batch_size, sequence_length, 384).
+        hidden_states: Fixed Q.16 (batch_size, sequence_length, 384).
         attention_mask: (batch_size, sequence_length), 1 for real tokens.
 
-        Returns: Q.16 context of shape (B, N, 384), np.int32.
+        Returns: Q.16 context of shape (B, N, 384).
         """
-        hidden_states = np.asarray(hidden_states)
+        if not isinstance(hidden_states, Fixed):
+            raise TypeError("hidden_states must be a Fixed Q.16 tensor")
         if hidden_states.ndim != 3 or hidden_states.shape[-1] != HIDDEN_SIZE:
             raise ValueError(f"Expected input shape (B, N, {HIDDEN_SIZE})")
-        if not np.issubdtype(hidden_states.dtype, np.integer):
-            raise TypeError("hidden_states must be a Q.16 integer tensor")
         batch_size, seq_len, _ = hidden_states.shape
         if attention_mask is None:
             attention_mask = np.ones((batch_size, seq_len), dtype=np.int64)
@@ -69,49 +73,43 @@ class SelfAttention:
             raise ValueError("attention_mask must contain only 0 or 1")
 
         # The input is quantized once and shared by Q, K and V.
-        x = quantize_fixed(hidden_states, axis=-1)
-        q = self.split_heads(self.query.forward_quantized(*x))
-        k = self.split_heads(self.key.forward_quantized(*x))
-        v = self.split_heads(self.value.forward_quantized(*x))
+        x = quantize(hidden_states, axis=-1)
+        q = self.split_heads(self.query.forward_quantized(x))
+        k = self.split_heads(self.key.forward_quantized(x))
+        v = self.split_heads(self.value.forward_quantized(x))
 
         # Q and K: one scale per token and head. V: one scale per channel,
         # since the context sums over tokens.
-        q_q, q_m, q_n = quantize_fixed(q, axis=-1)
-        k_q, k_m, k_n = quantize_fixed(k, axis=-1)
-        v_q, v_m, v_n = quantize_fixed(v, axis=-2)
+        q = quantize(q, axis=-1)
+        k = quantize(k, axis=-1)
+        v = quantize(v, axis=-2)
 
-        score_accumulator = q_q.astype(np.int64) @ k_q.astype(np.int64).swapaxes(-2, -1)
-        check_bits(score_accumulator, 20, "score accumulator")
+        score_accumulator = (q.codes @ k.codes.swapaxes(-2, -1)).resize(
+            SCORE_ACCUMULATOR_BITS, name="score accumulator")
 
         # z = acc * S_q[i] * S_k[j] / sqrt(D), in Q.16.
-        k_m, k_n = k_m.swapaxes(-2, -1), k_n.swapaxes(-2, -1)
-        scores = round_shift(
-            score_accumulator * (q_m * k_m) * INV_SQRT_HEAD_DIM,
-            q_n + k_n + INV_SQRT_HEAD_DIM_BITS - FRAC_BITS,
-        )
+        score_scale = q.scale * k.scale.swapaxes(-2, -1) * INV_SQRT_HEAD_DIM
+        scores = score_scale.rescale(score_accumulator, FRAC_BITS)
 
         mask = attention_mask[:, None, None, :] != 0
-        probabilities_q, total = softmax_fixed(scores, mask, self.exp2_lut)
+        probabilities, total = softmax_fixed(scores, mask, self.exp2_lut)
 
-        context_accumulator = probabilities_q.astype(np.int64) @ v_q.astype(np.int64)
-        check_bits(context_accumulator, 22, "context accumulator")
+        context_accumulator = (probabilities @ v.codes).resize(
+            CONTEXT_ACCUMULATOR_BITS, name="context accumulator")
 
-        # context = acc * S_v * 2**15 / (127 * E), one reciprocal per row.
-        mantissa, shift = reciprocal_fixed(PROBABILITY_MAX * total, self.reciprocal_lut)
-        context = round_shift(
-            context_accumulator * v_m * mantissa,
-            v_n + shift - EXP2_FRAC_BITS - FRAC_BITS,
-        )
+        # context = acc * S_v / (127 * E), one reciprocal per row; E is Q.15.
+        inverse_total = reciprocal_fixed(PROBABILITY_MAX * total, self.reciprocal_lut)
+        context = (v.scale * inverse_total).rescale(context_accumulator, FRAC_BITS)
         context = context.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, HIDDEN_SIZE)
-        context = check_bits(context, 32, "context").astype(np.int32)
+        context = context.resize(WIDE_BITS, name="context")
 
         if self.trace and self.layers_output is not None:
             self.layers_output.update({
-                f"{self.prefix}.score_accumulator": score_accumulator,
-                f"{self.prefix}.scores": to_float(scores),
-                f"{self.prefix}.probabilities_quantized": probabilities_q,
-                f"{self.prefix}.probability_total": total,
-                f"{self.prefix}.context_accumulator": context_accumulator,
-                f"{self.prefix}.output": to_float(context),
+                f"{self.prefix}.score_accumulator": score_accumulator.raw,
+                f"{self.prefix}.scores": scores.to_float(),
+                f"{self.prefix}.probabilities_quantized": probabilities.raw,
+                f"{self.prefix}.probability_total": total.raw,
+                f"{self.prefix}.context_accumulator": context_accumulator.raw,
+                f"{self.prefix}.output": context.to_float(),
             })
         return context

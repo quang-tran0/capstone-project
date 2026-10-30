@@ -47,7 +47,7 @@ $$
 x \gg k = \left\lfloor x / 2^{k} \right\rfloor
 $$
 
-**Dịch phải có làm tròn** (`round_shift`); khi $k < 0$ thì đây là dịch trái:
+**Dịch phải có làm tròn** (`Fixed.round_shift`); khi $k < 0$ thì đây là dịch trái:
 
 $$
 \operatorname{rshift}(x, k) =
@@ -64,7 +64,7 @@ $$
 \operatorname{cshift}(x, k) = \left(x + 2^{k} - 1\right) \gg k = \left\lceil x / 2^{k} \right\rceil
 $$
 
-**Bộ mã hoá ưu tiên** (`bit_length`), tức mạch tìm bit 1 cao nhất:
+**Bộ mã hoá ưu tiên** (`leading_one`), tức mạch tìm bit 1 cao nhất:
 
 $$
 \operatorname{bitlen}(v) = \begin{cases} \lfloor \log_2 v \rfloor + 1 & v > 0 \\ 0 & v = 0 \end{cases}
@@ -76,8 +76,9 @@ $$
 \operatorname{sat}_B(x) = \min\!\left(\max\!\left(x,\ -(2^{B-1}-1)\right),\ 2^{B-1}-1\right)
 $$
 
-**Kiểm tra tràn** (`check_bits`): mô phỏng báo `OverflowError` nếu
+**Kiểm tra tràn** (`Fixed.resize`): mô phỏng báo `OverflowError` nếu
 $x \notin [-2^{B-1}, 2^{B-1})$. Tức là mỗi thanh ghi trên FPGA đều được kiểm tra độ rộng.
+Các kiểu `Fixed`, `Scale` nằm trong `model/numpy/hwtypes/`.
 
 ---
 
@@ -99,7 +100,7 @@ $$
 S = m \cdot 2^{-n}, \qquad m \in [1, 127]\ (\text{INT8}), \quad n \in [0, 31]\ (\text{UINT5})
 $$
 
-Đây là định dạng `ScaleInt12` với $n$ mở rộng từ 4 lên **5 bit**. Lý do: scale per-channel
+Đây là `ScaleFormat(m_bits=7, n_bits=5)`, mở rộng $n$ của định dạng cũ từ 4 lên **5 bit**. Lý do: scale per-channel
 của weight thường cỡ $10^{-3}$–$10^{-4}$, nhỏ hơn $2^{-15}$. Nếu giới hạn $n \le 15$ thì $m$
 chỉ còn vài đơn vị và mất độ chính xác.
 
@@ -141,7 +142,7 @@ $$
 Làm tròn lên bảo đảm $m_j 2^{-n_j} \ge s$, nên phần tử lớn nhất cho mã $\le 127$: không
 phần tử nào bị cắt, và sai số luôn $\le \tfrac{1}{2}$ bước.
 
-### 3.2. Activation (lúc chạy, `quantize_fixed`)
+### 3.2. Activation (lúc chạy, `quantize`)
 
 Đầu vào là một hàng $x$ ở Q.16. Tất cả đều là phép số nguyên.
 

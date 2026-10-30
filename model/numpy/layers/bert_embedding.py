@@ -1,7 +1,7 @@
 import numpy as np
 
 from .int_layer_norm import IntLayerNorm
-from ..utils.fixed import FRAC_BITS, round_shift, to_float
+from ..utils.fixed import FRAC_BITS, WIDE_BITS
 from ..utils.int_quantize import quantize_weight
 
 EMBEDDING_NAMES = ("word_embeddings", "position_embeddings", "token_type_embeddings")
@@ -22,12 +22,10 @@ class BertEmbeddings:
         self.layer_norm = IntLayerNorm(tensors)
 
     def _lookup(self, name, ids):
-        """Read INT8 rows and rescale them to Q.16: q * m * 2**(16 - n)."""
-        codes, multiplier, degree = self.tables[name]
-        return round_shift(
-            codes[ids].astype(np.int64) * multiplier[ids],
-            degree[ids] - FRAC_BITS,
-        )
+        """Read INT8 rows with their scales and rescale them to Q.16: q * m * 2**(16 - n)."""
+        table = self.tables[name]
+        return table.scale[ids].rescale(table.codes[ids], FRAC_BITS).resize(
+            WIDE_BITS, name=f"{name} lookup")
 
     def forward(self, input_ids, token_type_ids=None):
         input_ids = np.asarray(input_ids)
@@ -35,18 +33,18 @@ class BertEmbeddings:
             raise ValueError("input_ids must have non-empty shape (B, N)")
         if not np.issubdtype(input_ids.dtype, np.integer):
             raise TypeError("input_ids must contain integer token IDs")
-        vocabulary = self.tables["word_embeddings"][0].shape[0]
+        vocabulary = self.tables["word_embeddings"].codes.shape[0]
         if np.any(input_ids < 0) or np.any(input_ids >= vocabulary):
             raise ValueError("input_ids contain an out-of-vocabulary token ID")
         _, seq_len = input_ids.shape
-        if seq_len > self.tables["position_embeddings"][0].shape[0]:
+        if seq_len > self.tables["position_embeddings"].codes.shape[0]:
             raise ValueError("Sequence exceeds the position embedding table")
         if token_type_ids is None:
             token_type_ids = np.zeros_like(input_ids)
         token_type_ids = np.asarray(token_type_ids)
         if token_type_ids.shape != input_ids.shape or not np.issubdtype(token_type_ids.dtype, np.integer):
             raise ValueError("token_type_ids must have integer shape (B, N)")
-        type_count = self.tables["token_type_embeddings"][0].shape[0]
+        type_count = self.tables["token_type_embeddings"].codes.shape[0]
         if np.any(token_type_ids < 0) or np.any(token_type_ids >= type_count):
             raise ValueError("token_type_ids contain an out-of-range type ID")
         position_ids = np.arange(seq_len, dtype=np.int64)[None, :]
@@ -61,11 +59,11 @@ class BertEmbeddings:
         # TRACE
         if self.trace and self.layers_output is not None:
             self.layers_output.update({
-                "embeddings.word": to_float(word),
-                "embeddings.position": to_float(np.broadcast_to(position, word.shape)),
-                "embeddings.token_type": to_float(token_type),
-                "embeddings.sum": to_float(summed),
-                "embeddings.output": to_float(output),
+                "embeddings.word": word.to_float(),
+                "embeddings.position": position.broadcast_to(word.shape).to_float(),
+                "embeddings.token_type": token_type.to_float(),
+                "embeddings.sum": summed.to_float(),
+                "embeddings.output": output.to_float(),
             })
         return output
 

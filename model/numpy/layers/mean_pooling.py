@@ -1,6 +1,7 @@
 import numpy as np
 
-from ..utils.fixed import round_shift
+from ..hwtypes import Fixed
+from ..utils.fixed import WIDE_BITS
 from ..utils.reciprocal import prepare_reciprocal_lut, reciprocal_fixed
 
 
@@ -11,7 +12,8 @@ class MeanPooling:
         self.reciprocal_lut = prepare_reciprocal_lut()
 
     def __call__(self, hidden_states, attention_mask=None):
-        hidden_states = np.asarray(hidden_states, dtype=np.int64)
+        if not isinstance(hidden_states, Fixed):
+            raise TypeError("Pooling input must be a Fixed tensor")
         if hidden_states.ndim != 3 or hidden_states.shape[1] == 0:
             raise ValueError("Pooling expects a non-empty tensor with shape (B, N, H)")
         if attention_mask is None:
@@ -19,7 +21,7 @@ class MeanPooling:
         mask = np.asarray(attention_mask)
         if mask.shape != hidden_states.shape[:2] or not np.all((mask == 0) | (mask == 1)):
             raise ValueError("Pooling mask must be binary with shape (B, N)")
-        summed = (hidden_states * mask.astype(np.int64)[..., None]).sum(axis=1)
-        counts = mask.sum(axis=1, keepdims=True).clip(min=1)
-        mantissa, shift = reciprocal_fixed(counts, self.reciprocal_lut)
-        return round_shift(summed * mantissa, shift).astype(np.int32)
+        summed = (hidden_states * mask[..., None]).sum(axis=1)
+        counts = Fixed.const(mask.sum(axis=1, keepdims=True).clip(min=1))
+        inverse_count = reciprocal_fixed(counts, self.reciprocal_lut)
+        return inverse_count.rescale(summed, hidden_states.frac).resize(WIDE_BITS, name="pooling")

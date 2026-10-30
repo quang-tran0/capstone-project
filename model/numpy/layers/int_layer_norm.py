@@ -2,7 +2,8 @@ import math
 
 import numpy as np
 
-from ..utils.fixed import FRAC_BITS, bit_length, check_bits, round_shift, to_float
+from ..hwtypes import Fixed, leading_one, where
+from ..utils.fixed import FRAC_BITS, WIDE_BITS
 from ..utils.rsqrt import prepare_rsqrt_lut, rsqrt_fixed
 
 
@@ -33,9 +34,9 @@ class IntLayerNorm:
         self.width = weight.size
 
         # Offline constants: G = gamma * sqrt(N) in Q.10, B = beta in Q.16.
-        gamma = np.round(weight * math.sqrt(self.width) * (1 << GAMMA_FRAC_BITS))
-        self.gamma = check_bits(gamma.astype(np.int64), SQUARE_BITS, "gamma")
-        self.beta = np.round(bias * (1 << OUTPUT_FRAC_BITS)).astype(np.int64)
+        self.gamma = Fixed.from_float(weight * math.sqrt(self.width), SQUARE_BITS,
+                                      GAMMA_FRAC_BITS, name="gamma")
+        self.beta = Fixed.from_float(bias, WIDE_BITS, OUTPUT_FRAC_BITS, name="beta")
         self.lut = prepare_rsqrt_lut()
 
         self.prefix = prefix
@@ -43,43 +44,37 @@ class IntLayerNorm:
         self.layers_output = layers_output
 
     def normalize(self, codes):
-        """Return the LayerNorm output as np.int32 in Q.OUTPUT_FRAC_BITS."""
-        codes = np.asarray(codes, dtype=np.int64)
-
+        """Return the LayerNorm output as Q.OUTPUT_FRAC_BITS in WIDE_BITS."""
         # d = N * (x - mean), without dividing by N.
         deviation = codes * self.width - codes.sum(axis=-1, keepdims=True)
 
         # Per-vector shift so e uses all SQUARE_BITS; d / ||d|| is unchanged
-        # when every element is shifted by the same amount.
-        peak = np.abs(deviation).max(axis=-1, keepdims=True)
-        shift_down = np.maximum(bit_length(peak) + 1 - SQUARE_BITS, 0)
-        reduced = check_bits(deviation >> shift_down, SQUARE_BITS, "deviation")
-        square_sum = (reduced * reduced).sum(axis=-1, keepdims=True)
-        check_bits(square_sum, ACCUMULATOR_BITS, "sum of squares")
+        # when every element is shifted by the same amount, so the fraction is dropped.
+        peak = abs(deviation).max(axis=-1, keepdims=True)
+        shift_down = (leading_one(peak) + (1 - SQUARE_BITS)).clip(0)
+        reduced = (deviation >> shift_down).with_frac(0).resize(SQUARE_BITS, name="deviation")
+        square_sum = (reduced * reduced).sum(axis=-1, keepdims=True).resize(
+            ACCUMULATOR_BITS, name="sum of squares")
 
         # A constant vector has d = 0, leaving only beta.
         constant = square_sum == 0
-        mantissa, shift = rsqrt_fixed(np.where(constant, 1, square_sum), self.lut)
+        inverse_norm = rsqrt_fixed(where(constant, 1, square_sum), self.lut)
 
         # d / ||d||, saturated since it reaches exactly 1.0 when one element is nonzero.
         norm_limit = (1 << NORM_FRAC_BITS) - 1
-        norm = round_shift(reduced * mantissa, shift - NORM_FRAC_BITS)
-        norm = np.where(constant, 0, np.clip(norm, -norm_limit, norm_limit))
+        norm = inverse_norm.rescale(reduced, NORM_FRAC_BITS).clip(-norm_limit, norm_limit)
+        norm = where(constant, 0, norm)
 
-        scaled = round_shift(
-            norm * self.gamma,
-            NORM_FRAC_BITS + GAMMA_FRAC_BITS - OUTPUT_FRAC_BITS,
-        )
-        return check_bits(scaled + self.beta, 32, "LayerNorm output").astype(np.int32)
+        scaled = (norm * self.gamma).round_shift(NORM_FRAC_BITS + GAMMA_FRAC_BITS - OUTPUT_FRAC_BITS)
+        return (scaled + self.beta).resize(WIDE_BITS, name="LayerNorm output")
 
     def __call__(self, hidden_states):
-        """Integer input in any fixed-point format -> Q.16 np.int32."""
-        hidden_states = np.asarray(hidden_states)
-        if not np.issubdtype(hidden_states.dtype, np.integer):
-            raise TypeError("LayerNorm input must be an integer tensor")
+        """Fixed input in any fraction -> Q.16."""
+        if not isinstance(hidden_states, Fixed):
+            raise TypeError("LayerNorm input must be a Fixed tensor")
         if hidden_states.shape[-1] != self.width:
             raise ValueError("Invalid LayerNorm hidden dimension")
         output = self.normalize(hidden_states)
         if self.trace and self.layers_output is not None:
-            self.layers_output[f"{self.prefix}.output"] = to_float(output)
+            self.layers_output[f"{self.prefix}.output"] = output.to_float()
         return output
