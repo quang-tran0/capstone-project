@@ -73,13 +73,13 @@ Cách chọn $(m, n)$ được giải thích ở [[06 - Lượng tử hoá]].
 `Scale(m, n)` gồm hai trường `Fixed` không dấu. Chúng có shape, nên một `Scale` có thể chứa
 nhiều scale (mỗi token, mỗi cột một scale) và tự broadcast khi tính.
 
-| Phép | Ý nghĩa |
-|---|---|
-| `S1 * S2` | $m = m_1 m_2$, $n = n_1 + n_2$; giữ đủ bit, không làm tròn |
-| `S.rescale(value, frac)` | $\text{value} \cdot m \cdot 2^{-n}$, kết quả ở Q.`frac` |
-| `S[idx]`, `S.swapaxes(...)` | Chọn hàng, đổi trục như mảng |
-| `S.pack()` | Ghép $\{m, n\}$ thành một word (12 bit với mặc định) |
-| `Scale.const(m, n)` | Hằng số, ví dụ $1/\sqrt{32} \approx$ `Scale.const(5793, 15)` |
+| Phép                        | Ý nghĩa                                                      |
+| --------------------------- | ------------------------------------------------------------ |
+| `S1 * S2`                   | $m = m_1 m_2$, $n = n_1 + n_2$; giữ đủ bit, không làm tròn   |
+| `S.rescale(value, frac)`    | Gắn scale $S$ vào số nguyên `value`: trả về $\text{value} \cdot m \cdot 2^{-n}$ ở Q.`frac` (xem bên dưới) |
+| `S[idx]`, `S.swapaxes(...)` | Chọn hàng, đổi trục như mảng                                 |
+| `S.pack()`                  | Ghép $\{m, n\}$ thành một word (12 bit với mặc định)         |
+| `Scale.const(m, n)`         | Hằng số, ví dụ $1/\sqrt{32} \approx$ `Scale.const(5793, 15)` |
 
 ### Nhân hai scale
 
@@ -91,39 +91,114 @@ Trên phần cứng là một bộ nhân 7 × 7 bit (ra 14 bit) và một bộ c
 
 ### Rescale - nhân với scale và đổi định dạng
 
-Đây là phép quan trọng nhất, dùng sau mọi phép nhân ma trận:
+#### `value` là gì
+
+`rescale` luôn có **hai thứ khác nhau** tham gia:
+
+| Thứ                | Là gì                                                               | Ví dụ                                                         |
+| ------------------ | ------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `value`            | **Dữ liệu**: một số nguyên (hoặc mảng số nguyên) chưa có nghĩa thực | Accumulator sau phép nhân ma trận, mã INT8 của bảng embedding |
+| `self` (scale $S$) | **Hệ số** cho biết mỗi đơn vị của `value` đáng giá bao nhiêu        | $S = m \cdot 2^{-n}$                                          |
+
+$m$ và $n$ là của **scale**, không phải của `value`. Giá trị thật mà `value` biểu diễn là:
+
+$$
+\text{giá trị thật} = \text{value} \times S = \text{value} \times m \times 2^{-n}
+$$
+
+Có thể hình dung như hoá đơn: `value` là **số lượng** (ví dụ 26 375 món), còn $S$ là **đơn giá**
+của một món. Muốn biết tổng tiền thì nhân hai thứ với nhau. `rescale` làm đúng phép nhân đó,
+và trả kết quả về dạng Q.16 để các bước sau dùng chung một đơn vị.
+
+Ví dụ trong `Linear` ([[07 - Linear]]):
+
+- Systolic array cho ra $\text{acc} = -26375$. Đây là tổng các tích INT8 × INT8, một số nguyên
+  không có đơn vị rõ ràng.
+- Scale tương ứng là $S = S_x \cdot S_w = 6080 \cdot 2^{-28}$ (tích của scale input và scale weight).
+- Giá trị thật là $-26375 \times 6080 \times 2^{-28} = -0.5974$.
+
+Ở đây `value = acc`, còn `m = 6080`, `n = 28` là của scale.
+
+#### Nhiệm vụ của rescale
+
+Đầu vào: số nguyên `value` và scale $(m, n)$.
+Đầu ra: **một số nguyên mới ở Q.16** biểu diễn cùng giá trị thật, tức là số nguyên $y$ sao cho
+
+$$
+y \cdot 2^{-16} \approx \text{value} \cdot m \cdot 2^{-n}
+\qquad\Longleftrightarrow\qquad
+y \approx \text{value} \cdot m \cdot 2^{16 - n}
+$$
+
+Vế phải chỉ có hai phép:
+
+1. **Nhân `value` với $m$:** nhân số nguyên, chính xác hoàn toàn.
+2. **Nhân với $2^{16 - n}$:** tức là **dịch phải $n - 16$ bit** (có làm tròn). Nếu $n < 16$ thì
+   là dịch trái.
+
+$$
+y = \operatorname{round\_shift}\big(\text{value} \cdot m,\ n - 16\big)
+$$
+
+#### Vì sao chỉ cần dịch theo $n$ mà vẫn đúng
+
+Vì $m$ đã được **nhân thẳng vào `value`** ở bước 1, nên sau bước 1 không còn phần $m$ nào phải
+xử lý. Theo dõi "một đơn vị của số nguyên đáng giá bao nhiêu" qua từng bước, với ví dụ trên:
+
+| Bước | Số nguyên đang cầm | Một đơn vị của nó đáng giá | Giá trị thật |
+|---|---|---|---|
+| Ban đầu | `value` = −26 375 | $S = 6080 \cdot 2^{-28}$ | $-26375 \times 6080 \times 2^{-28} = -0.5974$ |
+| Sau bước 1: × $m$ | `value · m` = −160 360 000 | $2^{-28}$ | $-160\,360\,000 \times 2^{-28} = -0.5974$ |
+| Sau bước 2: dịch phải $28 - 16 = 12$ | $y$ = −39 150 | $2^{-16}$ (Q.16) | $-39150 \times 2^{-16} = -0.5974$ |
+
+Cột cuối không đổi: mỗi bước chỉ đổi cách viết, không đổi giá trị. Bước 1 chuyển $m$ từ "đơn
+giá" sang "số lượng", để đơn giá chỉ còn là lũy thừa của 2. Đổi giữa các lũy thừa của 2 thì chỉ
+cần dịch bit.
+
+Bước 1 là chính xác (số nguyên nhân số nguyên). Sai số duy nhất nằm ở bước 2, tối đa ½ LSB của
+Q.16 nhờ làm tròn.
+
+#### Tham số `frac` và `value.frac`
+
+Code tổng quát hơn công thức trên một chút:
 
 ```python
 def rescale(self, value, frac):
     return (value * self.m).round_shift(self.n + (value.frac - frac), frac=frac)
 ```
 
-Nghĩa là: nhân `value` với $m$, rồi dịch phải $n + \text{value.frac} - \text{frac}$ bit có làm
-tròn. Kết quả là $\text{value} \cdot m \cdot 2^{-n}$ ở định dạng Q.`frac`.
+| Tham số | Ý nghĩa |
+|---|---|
+| `frac` | Định dạng muốn nhận: Q.`frac`. Hầu hết là 16; cosine dùng 15; LayerNorm dùng 17 |
+| `value.frac` | Nếu bản thân `value` đã là số fixed-point (không phải số nguyên thuần) thì phần thập phân này cũng được tính vào lượng dịch |
 
-**Vì sao chỉ cần dịch theo $n$ mà vẫn đúng, dù scale còn có $m$?** Vì $m$ đã được **nhân thẳng
-vào** số nguyên trước khi dịch. Theo dõi đơn vị của số nguyên qua từng bước:
+Lượng dịch tổng quát là $n + \text{value.frac} - \text{frac}$. Với accumulator hay mã INT8 thì
+`value.frac = 0` và `frac = 16`, nên lượng dịch là $n - 16$ như ở trên.
 
-| Bước | Số nguyên | Một đơn vị bằng |
-|---|---|---|
-| Ban đầu | `value` | $m \cdot 2^{-n}$ (có $m$ lẻ) |
-| Nhân với $m$ | `value · m` | $2^{-n}$ (đã sạch $m$) |
-| Dịch phải $n - 16$ | kết quả | $2^{-16}$, tức Q.16 |
-
-Phép nhân với $m$ là chính xác (số nguyên nhân số nguyên). Sai số duy nhất là phép dịch, tối
-đa ½ LSB.
-
-### Ví dụ
+#### Ví dụ bằng code
 
 ```python
-acc = Fixed.const(-26375)
-scale = Scale.const(76, 12) * Scale.const(80, 16)   # m = 6080, n = 28
+acc = Fixed.const(-26375)                            # value: số nguyên, frac = 0
+scale = Scale.const(76, 12) * Scale.const(80, 16)   # S_x * S_w: m = 6080, n = 28
 y = scale.rescale(acc, frac=16)
-# (-26375 * 6080) >> 12 = -160 360 000 >> 12 = -39150   (Q.16)
+# bước 1: -26375 * 6080      = -160 360 000
+# bước 2: round_shift(..., 28 + 0 - 16 = 12) = -39150     (Q.16)
 y.to_float()                                         # -0.5974
 ```
 
-Kiểm tra bằng số thực: $-26375 \times 6080 \times 2^{-28} = -0.5974$. Khớp.
+#### Rescale được dùng ở đâu
+
+| Chỗ dùng | `value` | Scale $(m, n)$ |
+|---|---|---|
+| `Linear` ([[07 - Linear]]) | Accumulator INT8 × INT8 | $S_x \cdot S_w$: scale của token × scale của cột weight |
+| Embedding ([[08 - Embedding]]) | Mã INT8 của một hàng bảng | Scale của hàng đó |
+| Điểm attention ([[09 - Self-attention và softmax]]) | Accumulator $QK^\top$ | $S_Q \cdot S_K \cdot (1/\sqrt{32})$ |
+| Context ([[09 - Self-attention và softmax]]) | Accumulator $PV$ | $S_V \cdot \frac{1}{127E}$ |
+| Mean pooling ([[12 - Mean pooling và cosine]]) | Tổng các token (Q.16) | $1/c$ |
+| LayerNorm ([[10 - LayerNorm]]) | $e$ đã thu nhỏ | $1/\sqrt{S}$ |
+
+Mọi chỗ đều cùng một mẫu: **có một số nguyên cần "gắn đơn vị", và một scale nói đơn vị đó là
+bao nhiêu**.
 
 ## 4.6. `QTensor`
 
