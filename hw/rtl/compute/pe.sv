@@ -15,11 +15,6 @@ module pe #(
     // Clear local accumulator before starting a new output tile
     input  logic acc_clear,
 
-    // Bias/partial sum in accumulator units. Load does not require step_en.
-    // Priority: reset > clear > load > MAC.
-    input  logic acc_load,
-    input  logic signed [ACC_WIDTH-1:0] acc_init,
-
     // Operand A: propagates horizontally
     input  logic signed [A_WIDTH-1:0] a_in,
     input  logic                      a_valid_in,
@@ -65,9 +60,6 @@ module pe #(
         end
         else if (acc_clear) begin
             acc_out <= '0;
-        end
-        else if (acc_load) begin
-            acc_out <= acc_init;
         end
         else if (
             step_en   &&

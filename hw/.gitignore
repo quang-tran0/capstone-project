@@ -10,4 +10,3 @@ sim/*.ucdb
 sim/vsim.dbg
 sim/tmp_report
 
-synth/

@@ -8,18 +8,12 @@ module systolic_array #(
     parameter int COLS = 16,
     parameter int A_WIDTH = 8,
     parameter int B_WIDTH = 8,
-    parameter int ACC_WIDTH = 32,
-    localparam int ROW_INDEX_WIDTH = (ROWS > 1) ? $clog2(ROWS) : 1
+    parameter int ACC_WIDTH = 32
 ) (
     input logic clk,
     input logic rst_n,
     input logic step_en,
     input logic acc_clear,
-
-    // Load COLS accumulators in the selected row; works with step_en=0.
-    input logic acc_load,
-    input logic [ROW_INDEX_WIDTH-1:0] acc_row,
-    input wire signed [ACC_WIDTH-1:0] acc_init [COLS],
 
     input wire signed [A_WIDTH-1:0] a_in [ROWS],
     input wire signed [B_WIDTH-1:0] b_in [COLS],
@@ -38,8 +32,6 @@ module systolic_array #(
     end
 
     for (genvar r = 0; r < ROWS; r++) begin : row
-        wire load_row;
-        assign load_row = acc_load && (acc_row == ROW_INDEX_WIDTH'(r));
         assign a_link[r][0] = a_in[r];
         assign av_link[r][0] = a_valid_in[r];
 
@@ -48,7 +40,6 @@ module systolic_array #(
                 .A_WIDTH(A_WIDTH), .B_WIDTH(B_WIDTH), .ACC_WIDTH(ACC_WIDTH)
             ) u_pe (
                 .clk(clk), .rst_n(rst_n), .step_en(step_en),
-                .acc_clear(acc_clear), .acc_load(load_row), .acc_init(acc_init[c]),
                 .a_in(a_link[r][c]), .a_valid_in(av_link[r][c]),
                 .b_in(b_link[r][c]), .b_valid_in(bv_link[r][c]),
 

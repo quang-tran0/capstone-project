@@ -2,35 +2,35 @@
 tags: [minilm, fpga, embedding]
 ---
 
-# Chương 8 — Embedding
+# Chapter 8 — Embedding
 
-← [[07 - Linear]] | Tiếp: [[09 - Self-attention và softmax]] →
+← [[07 - Linear]] | Next: [[09 - Self-attention and softmax]] →
 
 Code: `model/numpy/layers/bert_embedding.py`
 
-## 8.1. Công thức gốc
+## 8.1. Original formula
 
-Mỗi token được biểu diễn bằng tổng ba vector 384 chiều, rồi qua LayerNorm:
+Each token is represented by the sum of three 384-dimensional vectors, followed by LayerNorm:
 
 $$
-x = \operatorname{LayerNorm}\big(E_{\text{word}}[\text{id}] + E_{\text{pos}}[\text{vị trí}] + E_{\text{type}}[\text{loại}]\big)
+x = \operatorname{LayerNorm}\big(E_{\text{word}}[\text{id}] + E_{\text{pos}}[\text{position}] + E_{\text{type}}[\text{type}]\big)
 $$
 
-| Bảng | Kích thước | Ý nghĩa |
+| Table | Size | Meaning |
 |---|---|---|
-| Word | $250\,037 \times 384$ | Mỗi token trong từ vựng một vector |
-| Position | $512 \times 384$ | Mỗi vị trí trong câu một vector |
-| Token type | $2 \times 384$ | Câu A / câu B (đồ án luôn dùng loại 0) |
+| Word | $250\,037 \times 384$ | One vector per vocabulary token |
+| Position | $512 \times 384$ | One vector per position in the sentence |
+| Token type | $2 \times 384$ | Sentence A / sentence B (the project always uses type 0) |
 
-## 8.2. Lưu trữ (offline)
+## 8.2. Storage (offline)
 
-Ba bảng được lượng tử hoá INT8, **mỗi hàng một scale** (xem [[06 - Lượng tử hoá#6.2. Weight (offline)]]).
-Mỗi hàng là vector của một token, nên scale theo hàng giữ được độ chính xác cho cả token có giá
-trị nhỏ.
+All three tables are quantized to INT8 with **one scale per row** (see
+[[06 - Quantization#6.2. Weights (offline)]]). Each row is one token's vector, so per-row scales
+keep precision even for tokens with small values.
 
-## 8.3. Lúc chạy
+## 8.3. At run time
 
-Tra một hàng mã INT8 cùng scale của hàng đó, rồi đổi về Q.16:
+Read one row of INT8 codes together with that row's scale, and convert to Q.16:
 
 $$
 [e_k] = \operatorname{round\_shift}\!\left(q_k \cdot m,\ n - 16\right)
@@ -42,21 +42,22 @@ def _lookup(self, name, ids):
     return table.scale[ids].rescale(table.codes[ids], FRAC_BITS).resize(32)
 ```
 
-Phép nhân là 8 bit × 7 bit. Sau đó cộng ba vector (đều Q.16 nên cộng thẳng) và đưa qua LayerNorm:
+The multiply is 8 bits × 7 bits. Then the three vectors are added (all Q.16, so a plain addition)
+and passed to LayerNorm:
 
 $$
 [x] = [e_{\text{word}}] + [e_{\text{pos}}] + [e_{\text{type}}]
 $$
 
-Position ID chỉ là bộ đếm $0, 1, \dots, L - 1$.
+The position ID is just a counter $0, 1, \dots, L - 1$.
 
-## 8.4. Trên phần cứng
+## 8.4. In hardware
 
-Bảng word chiếm khoảng **96 MB** (INT8), không vừa bộ nhớ on-chip của KV260 (khoảng 2.9 MB). Vì
-mỗi token chỉ cần đọc đúng một hàng, cách hợp lý là để phần mềm (ARM) tra bảng trong DDR rồi gửi
-vector xuống, hoặc dùng DMA đọc hàng tương ứng. Hai bảng nhỏ (position, token type) có thể nằm
-trong BRAM.
+The word table takes about **96 MB** (INT8), far more than the KV260's on-chip memory (about
+2.9 MB). Since each token needs exactly one row, the sensible approach is to let software (ARM)
+look up the table in DDR and send the vectors down, or to fetch the row with DMA. The two small
+tables (position, token type) can live in BRAM.
 
 ---
 
-← [[07 - Linear]] | Tiếp: [[09 - Self-attention và softmax]] →
+← [[07 - Linear]] | Next: [[09 - Self-attention and softmax]] →
