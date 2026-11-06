@@ -11,7 +11,6 @@ module testbench;
     logic signed [7:0] b_in [ARRAY_SIZE];
     logic [ARRAY_SIZE-1:0] a_valid_in = '0;
     logic [ARRAY_SIZE-1:0] b_valid_in = '0;
-    logic signed [31:0] acc_init [ARRAY_SIZE];
     wire signed [31:0] acc_out [ARRAY_SIZE][ARRAY_SIZE];
 
     int matrix_a [MATRIX_SIZE][MATRIX_SIZE] = '{
@@ -39,9 +38,6 @@ module testbench;
         .rst_n(rst_n),
         .step_en(step_en),
         .acc_clear(1'b0),
-        .acc_load(1'b0),
-        .acc_row(3'd0),
-        .acc_init(acc_init),
         .a_in(a_in),
         .b_in(b_in),
         .a_valid_in(a_valid_in),
@@ -55,7 +51,6 @@ module testbench;
         for (int i = 0; i < ARRAY_SIZE; i++) begin
             a_in[i] = 0;
             b_in[i] = 0;
-            acc_init[i] = 0;
             for (int j = 0; j < ARRAY_SIZE; j++)
                 expected[i][j] = 0;
         end

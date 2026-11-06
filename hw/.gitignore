@@ -1,3 +1,4 @@
+# QuestaSim
 sim/work/
 sim/log/
 sim/modelsim.ini
@@ -10,3 +11,21 @@ sim/*.ucdb
 sim/vsim.dbg
 sim/tmp_report
 
+# Vivado simulator (xsim), see sim/xsim_wave.sh
+sim/xsim/
+sim/xsim.dir/
+
+# Vivado synthesis / implementation. Reports in synth/reports/ are tracked.
+synth/build/
+synth/out/
+synth/clockInfo.txt
+
+# Vivado files written to whatever directory it runs in
+.Xil/
+*.jou
+*.str
+*.backup.log
+vivado*.log
+vivado_pid*
+webtalk*
+usage_statistics_webtalk.*

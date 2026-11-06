@@ -37,7 +37,7 @@ flowchart TD
 | Module | Spec | RTL | Testbench | Synth | Notes |
 | --- | --- | --- | --- | --- | --- |
 | `pe` | [pe](pe.md) | ✅ | 🔄 being rewritten | ⬜ | INT8 MAC, forwards A/B |
-| `systolic_array` | ⬜ | ✅ | ✅ needs update after removing `acc_load` | ⬜ | Output-stationary mesh |
+| `systolic_array` | ⬜ | ✅ | ✅ | ✅ 16×16 @ 200 MHz, OOC | Output-stationary mesh; see synthesis results below |
 | `sync_fifo` | ⬜ | ✅ | ✅ | ⬜ | Single-clock FIFO, show-ahead read |
 | `skew_buffer` | ⬜ | ⬜ | ⬜ | ⬜ | Skews the array inputs |
 | `array_drain` | ⬜ | ⬜ | ⬜ | ⬜ | Reads results one row at a time, valid/ready |
@@ -48,6 +48,39 @@ flowchart TD
 ✅ done · 🔄 in progress · ⬜ not started
 
 Update this table in the same commit whenever a module's status changes.
+
+## Synthesis results
+
+Run out of context (OOC) with Vivado 2025.1 on `xck26-sfvc784-2LV-c`:
+
+```bash
+vivado -mode batch -source hw/synth/run_ooc.tcl -tclargs <block> [clock_mhz]
+```
+
+Reports land in `hw/synth/reports/<block>/` (`timing_target.rpt`, `utilization.rpt`,
+`utilization_hier.rpt`); checkpoints and logs in `hw/synth/build/` (not tracked).
+
+### `systolic_array` 16 × 16, 200 MHz (5.000 ns)
+
+Top `systolic_array_ooc` (`hw/synth/wrappers/`) registers every array input, as `skew_buffer` and
+the controller will; `acc_out` comes straight from the PE registers.
+
+| Check | Result |
+|---|---|
+| Setup | WNS 1.070 ns, TNS 0.000 ns (0 / 32 576 failing) |
+| Hold | WHS 0.010 ns, THS 0.000 ns (0 / 32 576 failing) |
+| Pulse width | WPWS 2.225 ns, TPWS 0.000 ns |
+| Critical path | `step_en` register → DSP `CEA2` of `row[10].col[1]`, 93.8 % routing (fanout to 256 PEs) |
+
+| Resource | `systolic_array` | Whole OOC top | Available | Top use |
+|---|---|---|---|---|
+| LUT | 143 | 143 | 117 120 | 0.12 % |
+| FF | 3 808 | 4 099 (+291 wrapper) | 234 240 | 1.75 % |
+| DSP48E2 | 256 | 256 | 1 248 | 20.51 % |
+| BRAM tile / URAM | 0 / 0 | 0 / 0 | 144 / 64 | 0 % |
+
+Methodology: only TIMING-18 (no input/output delay on the OOC ports), expected out of context.
+This is a timing check for the target FPGA, not a test on the board.
 
 ## Spec template
 

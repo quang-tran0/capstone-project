@@ -40,6 +40,7 @@ module systolic_array #(
                 .A_WIDTH(A_WIDTH), .B_WIDTH(B_WIDTH), .ACC_WIDTH(ACC_WIDTH)
             ) u_pe (
                 .clk(clk), .rst_n(rst_n), .step_en(step_en),
+                .acc_clear(acc_clear),
                 .a_in(a_link[r][c]), .a_valid_in(av_link[r][c]),
                 .b_in(b_link[r][c]), .b_valid_in(bv_link[r][c]),
 
